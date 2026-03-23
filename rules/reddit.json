@@ -1,0 +1,12 @@
+[
+  {
+    "rule": "SCOPE IS NON-NEGOTIABLE: When the pipeline specifies a target number of comments, posts, or upvotes, you MUST generate EXACTLY that number. Not fewer, not 'close to' — the exact number.",
+    "source": "jeff",
+    "addedAt": "2026-03-19"
+  },
+  {
+    "rule": "Every comment and post must be unique — different angles, different personas, different brand name variations. If generating multiple comments for the same thread, each must take a completely different approach. Never duplicate content or recycle the same angle.",
+    "source": "jeff",
+    "addedAt": "2026-03-19"
+  }
+]

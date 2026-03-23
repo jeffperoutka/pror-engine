@@ -1,0 +1,21 @@
+{
+  "name": "pror-engine",
+  "version": "1.0.0",
+  "description": "Unified AI engine for PROR — link building, reddit, QA, content, orchestration",
+  "main": "index.js",
+  "scripts": {
+    "dev": "vercel dev",
+    "deploy": "vercel --prod"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jeffperoutka11/pror-engine.git"
+  },
+  "author": "Jeff Peroutka",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
+    "@slack/web-api": "^7.15.0",
+    "airtable": "^0.12.2"
+  }
+}

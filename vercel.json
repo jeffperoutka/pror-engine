@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "functions": {
+    "api/**/*.js": {
+      "maxDuration": 300
+    }
+  },
+  "routes": [
+    { "src": "/api/slack/events", "dest": "/api/slack/events.js" },
+    { "src": "/api/slack/commands", "dest": "/api/slack/commands.js" },
+    { "src": "/api/slack/interact", "dest": "/api/slack/interact.js" },
+    { "src": "/api/health", "dest": "/api/health.js" }
+  ]
+}
