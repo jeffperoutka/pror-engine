@@ -16,6 +16,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.80.0",
     "@slack/web-api": "^7.15.0",
+    "@vercel/functions": "^3.4.3",
     "airtable": "^0.12.2"
   }
 }

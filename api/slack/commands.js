@@ -1,7 +1,8 @@
 /**
  * Slack Slash Commands handler
- * Routes: /links, /reddit, /qa, /sprint, /clients, /status, /finances
+ * Routes: /links, /reddit, /qa, /initiation, /clients, /current-status, /finances
  */
+const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
 const brain = require('../../shared/brain');
 
@@ -13,15 +14,8 @@ const agents = {
   'orchestrator': () => require('../../agents/orchestrator'),
 };
 
-module.exports = async (req, res) => {
-  // Parse the slash command
-  const { command, text, channel_id, user_id, response_url, trigger_id } = req.body;
-
-  // Acknowledge immediately
-  res.status(200).json({
-    response_type: 'in_channel',
-    text: `⏳ Processing \`${command} ${text || ''}\`...`,
-  });
+async function processCommand(body) {
+  const { command, text, channel_id, user_id, trigger_id, response_url } = body;
 
   try {
     // Route through brain
@@ -52,4 +46,15 @@ module.exports = async (req, res) => {
     console.error(`Command ${command} error:`, err);
     await slack.post(channel_id, `❌ Error executing \`${command}\`: ${err.message}`);
   }
+}
+
+module.exports = async (req, res) => {
+  // Use waitUntil to keep the function alive after responding
+  waitUntil(processCommand(req.body));
+
+  // Acknowledge immediately
+  res.status(200).json({
+    response_type: 'in_channel',
+    text: `⏳ Processing \`${req.body.command} ${req.body.text || ''}\`...`,
+  });
 };

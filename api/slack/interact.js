@@ -2,20 +2,10 @@
  * Slack Interactions handler
  * Handles: button clicks, modal submissions, action callbacks
  */
+const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
 
-module.exports = async (req, res) => {
-  // Slack sends interactions as a URL-encoded payload
-  let payload;
-  try {
-    payload = JSON.parse(req.body.payload || '{}');
-  } catch {
-    return res.status(400).json({ error: 'Invalid payload' });
-  }
-
-  // Acknowledge immediately
-  res.status(200).json({ ok: true });
-
+async function processInteraction(payload) {
   try {
     const type = payload.type;
     const user = payload.user?.id;
@@ -40,6 +30,22 @@ module.exports = async (req, res) => {
   } catch (err) {
     console.error('Interaction error:', err);
   }
+}
+
+module.exports = async (req, res) => {
+  // Slack sends interactions as a URL-encoded payload
+  let payload;
+  try {
+    payload = JSON.parse(req.body.payload || '{}');
+  } catch {
+    return res.status(400).json({ error: 'Invalid payload' });
+  }
+
+  // Use waitUntil to keep the function alive after responding
+  waitUntil(processInteraction(payload));
+
+  // Acknowledge immediately
+  res.status(200).json({ ok: true });
 };
 
 async function handleAction(action, context) {

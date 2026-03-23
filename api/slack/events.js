@@ -3,20 +3,13 @@
  * Handles: app_mention, message (DMs and subscribed channels)
  * Routes everything through the Brain
  */
+const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
 const brain = require('../../shared/brain');
 
-module.exports = async (req, res) => {
-  // Handle URL verification challenge
-  if (req.body?.type === 'url_verification') {
-    return res.json({ challenge: req.body.challenge });
-  }
-
-  // Acknowledge immediately (Slack needs response in 3s)
-  res.status(200).json({ ok: true });
-
+async function processEvent(body) {
   try {
-    const event = req.body?.event;
+    const event = body?.event;
     if (!event) return;
 
     // Ignore bot messages (prevent loops)
@@ -50,7 +43,7 @@ module.exports = async (req, res) => {
   } catch (err) {
     console.error('Event handler error:', err);
     try {
-      const event = req.body?.event;
+      const event = body?.event;
       if (event) {
         await slack.post(event.channel, `❌ Error: ${err.message}`, {
           thread_ts: event.thread_ts || event.ts,
@@ -60,4 +53,17 @@ module.exports = async (req, res) => {
       console.error('Failed to post error:', e);
     }
   }
+}
+
+module.exports = async (req, res) => {
+  // Handle URL verification challenge
+  if (req.body?.type === 'url_verification') {
+    return res.json({ challenge: req.body.challenge });
+  }
+
+  // Use waitUntil to keep the function alive after responding
+  waitUntil(processEvent(req.body));
+
+  // Acknowledge immediately (Slack needs response in 3s)
+  res.status(200).json({ ok: true });
 };
