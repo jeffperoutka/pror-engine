@@ -9,7 +9,7 @@ Single Vercel project, one Slack app, all agents share the same brain.
 - `agents/link-builder.js` — Consolidated link building pipeline (discover → emails → copy → Brevo → send)
 - `agents/reddit-strategist.js` — Reddit comment/post generation with brand alignment
 - `agents/qa-checker.js` — Quality assurance for links and Reddit
-- `agents/orchestrator.js` — Client management, status, finances, sprint coordination
+- `agents/orchestrator.js` — Client management, status, finances, initiation coordination
 
 ### Shared Modules
 - `shared/slack.js` — All Slack API interactions (post, update, stream, react, upload)
@@ -20,7 +20,7 @@ Single Vercel project, one Slack app, all agents share the same brain.
 
 ### API Endpoints
 - `api/slack/events.js` — Slack Events (mentions, messages)
-- `api/slack/commands.js` — Slash commands (/links, /reddit, /qa, /sprint, /clients, /status, /finances)
+- `api/slack/commands.js` — Slash commands (/links, /reddit, /qa, /initiation, /clients, /current-status, /finances)
 - `api/slack/interact.js` — Button clicks, modal submissions
 - `api/health.js` — Health check
 
@@ -28,9 +28,9 @@ Single Vercel project, one Slack app, all agents share the same brain.
 - `/links [client] [count] [dr40+]` — Run link building pipeline
 - `/reddit [client] [count]` — Generate Reddit comments
 - `/qa [client] [type]` — Run QA on links or reddit
-- `/sprint [client]` — Full client sprint
+- `/initiation [client]` — Full client initiation
 - `/clients` — List active clients
-- `/status [client]` — Client status + metrics
+- `/current-status [client]` — Client status + metrics
 - `/finances [client]` — P&L summary
 
 ## Development

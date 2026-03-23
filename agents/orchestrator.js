@@ -23,8 +23,8 @@ async function execute(args) {
     case 'finances':
       return financeSummary(client, channel);
     default:
-      // Full sprint orchestration
-      return runSprint(client, channel);
+      // Full initiation orchestration
+      return runInitiation(client, channel);
   }
 }
 
@@ -125,11 +125,11 @@ async function financeSummary(clientName, channel) {
 }
 
 /**
- * Run a full sprint for a client
+ * Run a full initiation for a client
  */
-async function runSprint(clientName, channel) {
+async function runInitiation(clientName, channel) {
   if (!clientName) {
-    return slack.post(channel, '⚠️ Please specify a client: `/sprint [client-name]`');
+    return slack.post(channel, '⚠️ Please specify a client: `/initiation [client-name]`');
   }
 
   const client = await db.getClient(clientName);
@@ -137,7 +137,7 @@ async function runSprint(clientName, channel) {
     return slack.post(channel, `❌ Client "${clientName}" not found.`);
   }
 
-  await slack.post(channel, `🚀 *Starting sprint for ${client.Name}*\n\nChecking scope and triggering agents...`);
+  await slack.post(channel, `🚀 *Starting initiation for ${client.Name}*\n\nChecking scope and triggering agents...`);
 
   // TODO: Read scope from client profile, trigger link-builder and reddit agents
   await slack.post(channel, `📋 Sprint orchestration coming in next update. For now, use individual commands:\n• \`/links ${clientName} [count]\`\n• \`/reddit ${clientName} [count]\``);

@@ -5,3 +5,4 @@ service-account.json
 .vercel/
 outputs/
 *.log
+.vercel

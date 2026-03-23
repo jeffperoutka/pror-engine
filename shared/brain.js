@@ -94,11 +94,11 @@ async function handleCommand(command, args, context = {}) {
       return { agent: 'reddit', args: parseArgs(args) };
     case '/qa':
       return { agent: 'qa', args: parseArgs(args) };
-    case '/sprint':
+    case '/initiation':
       return { agent: 'orchestrator', args: parseArgs(args) };
     case '/clients':
       return { agent: 'orchestrator', args: { action: 'list-clients', ...parseArgs(args) } };
-    case '/status':
+    case '/current-status':
       return { agent: 'orchestrator', args: { action: 'status', ...parseArgs(args) } };
     case '/finances':
       return { agent: 'orchestrator', args: { action: 'finances', ...parseArgs(args) } };
