@@ -10,9 +10,12 @@
     { "src": "/api/slack/commands", "dest": "/api/slack/commands.js" },
     { "src": "/api/slack/interact", "dest": "/api/slack/interact.js" },
     { "src": "/api/health", "dest": "/api/health.js" },
-    { "src": "/api/cron/digest", "dest": "/api/cron/digest.js" }
+    { "src": "/api/cron/digest", "dest": "/api/cron/digest.js" },
+    { "src": "/api/webhooks/engain", "dest": "/api/webhooks/engain.js" },
+    { "src": "/api/cron/gmail-poll", "dest": "/api/cron/gmail-poll.js" }
   ],
   "crons": [
-    { "path": "/api/cron/digest", "schedule": "0 7 * * 1-5" }
+    { "path": "/api/cron/digest", "schedule": "0 7 * * 1-5" },
+    { "path": "/api/cron/gmail-poll", "schedule": "*/2 * * * *" }
   ]
 }

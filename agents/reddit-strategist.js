@@ -6,6 +6,7 @@ const ai = require('../shared/ai');
 const db = require('../shared/airtable');
 const slack = require('../shared/slack');
 const google = require('../shared/google');
+const engain = require('../shared/engain');
 const fs = require('fs');
 const path = require('path');
 
@@ -531,4 +532,192 @@ async function handleAction(action, data, context) {
   }
 }
 
-module.exports = { execute, handleAction };
+/**
+ * Execute Posting — Submit approved content from Airtable to Engain
+ *
+ * Reads records with status "Approved" from the Reddit table,
+ * submits them to Engain with staggered scheduling (spread across 4-8 hours),
+ * updates Airtable status to "Submitted", and posts summary to Slack.
+ *
+ * Triggered by: /reddit-execute [client] Slack command or direct API call
+ */
+async function executePosting(args) {
+  const { client, channel, user } = args;
+
+  if (!client) {
+    return slack.post(channel, 'Please specify a client: `/reddit-execute [client]`');
+  }
+
+  const clientData = await db.getClient(client);
+  if (!clientData) {
+    return slack.post(channel, `Client "${client}" not found.`);
+  }
+
+  const redditChannel = channel || slack.CHANNELS.reddit();
+  const stream = await slack.streamPost(redditChannel);
+
+  try {
+    await stream.append(`*Reddit Execute — ${clientData.Name}*\nReading approved content from Airtable...`);
+
+    // ── Read approved records from Airtable ──
+    const base = db.getBase();
+    const approvedRecords = await base('Reddit').select({
+      filterByFormula: `AND({Client} = "${clientData.Name.replace(/"/g, '\\"')}", {Status} = "Approved")`,
+    }).all();
+
+    if (approvedRecords.length === 0) {
+      await stream.finish(`*Reddit Execute — ${clientData.Name}*\nNo approved items found. Mark records as "Approved" in Airtable first.`);
+      return;
+    }
+
+    const comments = approvedRecords.filter(r => r.fields.Type === 'Comment');
+    const posts = approvedRecords.filter(r => r.fields.Type === 'Post');
+
+    await stream.append(
+      `\nFound ${comments.length} comments + ${posts.length} posts. Submitting to Engain...`
+    );
+
+    // ── Calculate staggered schedule across 4-8 hours ──
+    const totalItems = approvedRecords.length;
+    const windowHours = 4 + Math.random() * 4; // 4-8 hours
+    const windowMs = windowHours * 60 * 60 * 1000;
+    const baseDelay = 15 * 60 * 1000; // Start 15 min from now
+
+    const results = { submitted: 0, errors: 0, details: [] };
+    const RATE_DELAY = 2200; // ~27 req/min to stay under Engain's 30/min
+
+    // ── Submit comments ──
+    for (let i = 0; i < comments.length; i++) {
+      const record = comments[i];
+      const { Content, Thread, Subreddit, 'Follow-Up Text': followUp } = record.fields;
+
+      // Thread field should contain the Reddit URL
+      const threadUrl = Thread || '';
+      if (!threadUrl || !Content) {
+        results.errors++;
+        results.details.push({ id: record.id, status: 'skipped', reason: 'Missing thread URL or content' });
+        continue;
+      }
+
+      try {
+        // Stagger across the window
+        const itemDelay = baseDelay + (i / Math.max(totalItems, 1)) * windowMs;
+        const scheduleAt = new Date(Date.now() + itemDelay).toISOString();
+
+        const task = await engain.createComment(threadUrl, Content, scheduleAt);
+        const taskId = task.id || task.task_id;
+
+        // Update Airtable: status -> Submitted, store task ID
+        await base('Reddit').update(record.id, {
+          Status: 'Submitted',
+          'Engain Task ID': taskId,
+          'Scheduled At': scheduleAt,
+        });
+
+        results.submitted++;
+        results.details.push({ id: record.id, taskId, type: 'comment', scheduleAt });
+        console.log(`[Execute] Comment ${i + 1}/${comments.length}: submitted (${taskId})`);
+      } catch (err) {
+        results.errors++;
+        results.details.push({ id: record.id, status: 'error', reason: err.message });
+        console.error(`[Execute] Comment ${i + 1} failed:`, err.message);
+
+        // Update Airtable with error
+        try {
+          await base('Reddit').update(record.id, {
+            Status: `Error: ${err.message.slice(0, 100)}`,
+          });
+        } catch (_) {}
+      }
+
+      // Rate limit pause between API calls
+      if (i < comments.length - 1) {
+        await new Promise(r => setTimeout(r, RATE_DELAY));
+      }
+    }
+
+    // ── Submit posts ──
+    for (let i = 0; i < posts.length; i++) {
+      const record = posts[i];
+      const { Content, Thread: title, Subreddit: subreddit } = record.fields;
+
+      if (!subreddit || !title || !Content) {
+        results.errors++;
+        results.details.push({ id: record.id, status: 'skipped', reason: 'Missing subreddit, title, or content' });
+        continue;
+      }
+
+      try {
+        // Posts get wider spacing — start after comments, spread over remaining window
+        const commentEndDelay = baseDelay + (comments.length / Math.max(totalItems, 1)) * windowMs;
+        const postDelay = commentEndDelay + ((i + 1) / Math.max(posts.length, 1)) * (windowMs * 0.5);
+        const scheduleAt = new Date(Date.now() + postDelay).toISOString();
+
+        const task = await engain.createPost(subreddit, title, Content, scheduleAt);
+        const taskId = task.id || task.task_id;
+
+        await base('Reddit').update(record.id, {
+          Status: 'Submitted',
+          'Engain Task ID': taskId,
+          'Scheduled At': scheduleAt,
+        });
+
+        results.submitted++;
+        results.details.push({ id: record.id, taskId, type: 'post', scheduleAt });
+        console.log(`[Execute] Post ${i + 1}/${posts.length}: submitted (${taskId})`);
+      } catch (err) {
+        results.errors++;
+        results.details.push({ id: record.id, status: 'error', reason: err.message });
+        console.error(`[Execute] Post ${i + 1} failed:`, err.message);
+
+        try {
+          await base('Reddit').update(record.id, {
+            Status: `Error: ${err.message.slice(0, 100)}`,
+          });
+        } catch (_) {}
+      }
+
+      if (i < posts.length - 1) {
+        await new Promise(r => setTimeout(r, RATE_DELAY));
+      }
+    }
+
+    // ── Summary to Slack ──
+    const errors = results.details.filter(d => d.status === 'error' || d.status === 'skipped');
+    const scheduled = results.details.filter(d => d.taskId);
+
+    const earliestTime = scheduled.length
+      ? new Date(Math.min(...scheduled.map(d => new Date(d.scheduleAt).getTime()))).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+      : 'N/A';
+    const latestTime = scheduled.length
+      ? new Date(Math.max(...scheduled.map(d => new Date(d.scheduleAt).getTime()))).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })
+      : 'N/A';
+
+    const summaryLines = [
+      `\n\n*Execution Complete*`,
+      `Submitted: ${results.submitted} items (${comments.length} comments, ${posts.length} posts)`,
+      `Schedule window: ${earliestTime} - ${latestTime}`,
+    ];
+
+    if (errors.length > 0) {
+      summaryLines.push(`Errors/Skipped: ${errors.length}`);
+      for (const e of errors.slice(0, 5)) {
+        summaryLines.push(`  - ${e.reason}`);
+      }
+    }
+
+    summaryLines.push(`\n_Engain will execute on schedule. Reddit URLs update automatically via webhook._`);
+
+    await stream.finish(
+      `*Reddit Execute — ${clientData.Name}*\n` + summaryLines.join('\n')
+    );
+
+    console.log(`[Execute] DONE — ${results.submitted} submitted, ${results.errors} errors for ${clientData.Name}`);
+
+  } catch (err) {
+    await stream.finish(`*Reddit Execute — ${clientData.Name}*\nFailed: ${err.message}`);
+    console.error('[Execute] Fatal error:', err.message, err.stack);
+  }
+}
+
+module.exports = { execute, executePosting, handleAction };

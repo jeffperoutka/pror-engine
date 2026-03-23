@@ -1,9 +1,65 @@
 /**
  * Daily Digest Agent
  * Generates daily/weekly summaries of all activity across clients
+ * Includes Gmail inbox summary (unread count, replies needing attention, auto-replies sent)
  */
 const db = require('../shared/airtable');
 const slack = require('../shared/slack');
+const gmail = require('../shared/gmail');
+
+// ── Gmail Inbox Summary ──────────────────────────────────────────────────────
+
+async function getGmailSummary() {
+  try {
+    // Run all Gmail queries in parallel
+    const [unreadCount, sentToday, recentMsgs] = await Promise.all([
+      gmail.getUnreadCount(),
+      gmail.getSentToday(),
+      gmail.getRecentMessages(1, 30),
+    ]);
+
+    // Classify recent messages by type (quick heuristic — no AI call needed for digest)
+    let repliesNeedingAttention = 0;
+    let inboundPitches = 0;
+    const keyEmails = [];
+
+    for (const { id } of recentMsgs.slice(0, 15)) {
+      try {
+        const email = await gmail.getMessage(id);
+        const subject = email.subject.toLowerCase();
+        const from = email.from.toLowerCase();
+        const isReply = subject.startsWith('re:') || subject.includes('re:');
+        const isSpam = from.includes('noreply') || from.includes('no-reply') || from.includes('mailer-daemon');
+        const isInbound = !isReply && !isSpam && (
+          subject.includes('link') || subject.includes('guest post') ||
+          subject.includes('partnership') || subject.includes('content')
+        );
+
+        if (isReply && email.labelIds.includes('UNREAD')) repliesNeedingAttention++;
+        if (isInbound) inboundPitches++;
+
+        if ((isReply || isInbound) && !isSpam) {
+          keyEmails.push({
+            from: email.from.replace(/<.*>/, '').trim().slice(0, 40),
+            subject: email.subject.slice(0, 60),
+            type: isReply ? 'reply' : 'inbound',
+          });
+        }
+      } catch { /* skip individual message errors */ }
+    }
+
+    return {
+      unread: unreadCount,
+      autoRepliesSent: sentToday.length,
+      repliesNeedingAttention,
+      inboundPitches,
+      keyEmails: keyEmails.slice(0, 6),
+    };
+  } catch (err) {
+    console.error('[daily-digest] Gmail summary error:', err.message);
+    return null;
+  }
+}
 
 async function execute(args = {}) {
   const { channel } = args;
@@ -23,7 +79,8 @@ async function execute(args = {}) {
     const dayName = today.toLocaleDateString('en-US', { weekday: 'long' });
     const monthName = today.toLocaleDateString('en-US', { month: 'long' });
 
-    // Pull all data
+    // Pull all data (Gmail summary runs in parallel with client data)
+    const gmailSummaryPromise = getGmailSummary();
     const clients = await db.getClients();
 
     if (!clients.length) {
@@ -73,10 +130,34 @@ async function execute(args = {}) {
 
     const totalMargin = totalRevenue ? ((1 - totalCosts / totalRevenue) * 100).toFixed(1) : '0.0';
 
+    // Resolve Gmail summary
+    const gmailSummary = await gmailSummaryPromise;
+
     // Build digest message
     let msg = `📊 *PROR Engine — Daily Digest*\n`;
     msg += `_${monthName} ${dayOfMonth}, ${today.getFullYear()} (${dayName})_\n\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
+
+    // Gmail Inbox section
+    if (gmailSummary) {
+      msg += `📧 *Gmail Inbox*\n`;
+      msg += `• Unread: ${gmailSummary.unread}\n`;
+      if (gmailSummary.repliesNeedingAttention > 0) {
+        msg += `• ⚠️ ${gmailSummary.repliesNeedingAttention} replies needing attention\n`;
+      }
+      if (gmailSummary.inboundPitches > 0) {
+        msg += `• 📥 ${gmailSummary.inboundPitches} inbound pitches\n`;
+      }
+      msg += `• 🤖 ${gmailSummary.autoRepliesSent} auto-replies sent today\n`;
+      if (gmailSummary.keyEmails.length > 0) {
+        msg += `  _Key emails:_\n`;
+        for (const e of gmailSummary.keyEmails) {
+          const icon = e.type === 'reply' ? '↩️' : '📥';
+          msg += `    ${icon} ${e.from} — _${e.subject}_\n`;
+        }
+      }
+      msg += '\n';
+    }
 
     // Links section
     msg += `🔗 *Link Building*\n`;
