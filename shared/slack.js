@@ -99,8 +99,8 @@ async function react(channel, ts, emoji) {
   try {
     await slack.reactions.add({ channel, timestamp: ts, name: emoji });
   } catch (e) {
-    // Ignore already_reacted errors
-    if (e.data?.error !== 'already_reacted') throw e;
+    // Non-fatal — don't crash the pipeline over a missing reaction
+    console.warn(`React failed (${emoji}):`, e.data?.error || e.message);
   }
 }
 
