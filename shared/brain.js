@@ -5,6 +5,7 @@
 const ai = require('./ai');
 const db = require('./airtable');
 const slack = require('./slack');
+const rules = require('./rules');
 
 const SYSTEM_PROMPT = `You are PROR Engine, Jeff's unified AI operating system for managing link building and Reddit marketing services.
 
@@ -26,6 +27,11 @@ Current date: ${new Date().toISOString().split('T')[0]}`;
  * Route a natural language message to the right agent/action
  */
 async function route(message, context = {}) {
+  // Check for memory/rule commands before hitting the AI router
+  if (/^(?:remember|new rule|rule|remember this|remember that)[:\s]+/i.test(message)) {
+    return { agent: 'memory', action: 'save rule', client: null, needsData: [] };
+  }
+
   const routingPrompt = `Given this message from Jeff, determine what action to take.
 
 Message: "${message}"
@@ -50,6 +56,12 @@ async function handleMessage(message, context = {}) {
   // Route the message
   const routing = await route(message, context);
 
+  // Handle memory/rule saves directly
+  if (routing.agent === 'memory') {
+    const confirmation = await rules.addRuleFromMessage(message);
+    return { response: confirmation, routing };
+  }
+
   // Fetch any needed data
   let dataContext = '';
   if (routing.needsData?.includes('clients')) {
@@ -70,10 +82,13 @@ async function handleMessage(message, context = {}) {
     dataContext += `\n\nFinances (${month}):\n${JSON.stringify(finances, null, 2)}`;
   }
 
+  // Load active rules for this agent
+  const activeRules = await rules.loadRules(routing.agent);
+
   // Generate response
   const response = await ai.complete(
     `${message}\n\nContext:${dataContext}`,
-    SYSTEM_PROMPT + `\n\nRouting decision: ${JSON.stringify(routing)}`,
+    SYSTEM_PROMPT + activeRules + `\n\nRouting decision: ${JSON.stringify(routing)}`,
     { maxTokens: 2048 }
   );
 
@@ -102,6 +117,8 @@ async function handleCommand(command, args, context = {}) {
       return { agent: 'orchestrator', args: { action: 'status', ...parseArgs(args) } };
     case '/finances':
       return { agent: 'orchestrator', args: { action: 'finances', ...parseArgs(args) } };
+    case '/digest':
+      return { agent: 'digest', args: {} };
     default:
       return { agent: 'general', args: { raw: args } };
   }

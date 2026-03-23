@@ -12,6 +12,7 @@ const agents = {
   'reddit': () => require('../../agents/reddit-strategist'),
   'qa': () => require('../../agents/qa-checker'),
   'orchestrator': () => require('../../agents/orchestrator'),
+  'digest': () => require('../../agents/daily-digest'),
 };
 
 async function processCommand(body) {

@@ -173,6 +173,47 @@ async function getFinances(opts = {}) {
   return records.map(r => ({ id: r.id, ...r.fields }));
 }
 
+// ========== RULES ==========
+
+/**
+ * Get rules, optionally filtered by agent
+ */
+async function getRules(agent = null) {
+  const base = getBase();
+  let filterByFormula;
+  if (agent) {
+    filterByFormula = `OR({Agent}="all", {Agent}="${agent.replace(/"/g, '\\"')}")`;
+  }
+  const records = await base('Rules').select({
+    filterByFormula: filterByFormula || undefined,
+  }).all();
+  return records.map(r => ({ id: r.id, ...r.fields }));
+}
+
+/**
+ * Add a new rule
+ */
+async function addRule(rule, agent = 'all', source = 'jeff', category = 'general') {
+  const base = getBase();
+  const record = await base('Rules').create({
+    Rule: rule,
+    Agent: agent,
+    Source: source,
+    Category: category,
+    CreatedAt: new Date().toISOString(),
+  });
+  return { id: record.id, ...record.fields };
+}
+
+/**
+ * Delete a rule by Airtable record ID
+ */
+async function deleteRule(ruleId) {
+  const base = getBase();
+  await base('Rules').destroy(ruleId);
+  return { deleted: true, id: ruleId };
+}
+
 module.exports = {
   getBase,
   getClients,
@@ -185,4 +226,7 @@ module.exports = {
   logCampaign,
   logFinance,
   getFinances,
+  getRules,
+  addRule,
+  deleteRule,
 };
