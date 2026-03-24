@@ -12,6 +12,7 @@ module.exports = async (req, res) => {
     return res.status(401).json({ error: 'Unauthorized' });
   }
 
-  waitUntil(digest.execute());
+  const channel = req.query?.channel || undefined;
+  waitUntil(digest.execute({ channel }));
   res.status(200).json({ ok: true, message: 'Digest triggered' });
 };
