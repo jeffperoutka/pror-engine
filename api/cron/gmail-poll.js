@@ -579,12 +579,8 @@ async function processInbox() {
         }
       }
 
-      // ── Post to Slack with interactive buttons (ALWAYS for learning mode) ──
-      const shouldNotify =
-        c.type === 'reply_to_outreach' ||
-        c.type === 'inbound_pitch' ||
-        c.suggested_action === 'flag_jeff' ||
-        replied;
+      // ── Post to Slack with interactive buttons (ALL replies for full visibility) ──
+      const shouldNotify = true; // Post everything — Jeff wants to see all opportunities and give feedback
 
       if (shouldNotify) {
         const { blocks, fallbackText } = buildSlackBlocks(email, c, {
