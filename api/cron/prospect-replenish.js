@@ -276,29 +276,29 @@ async function createEmailCampaign(name, sender, listId, subject, htmlBody, sche
 }
 
 /**
- * Fetch all existing Brevo contact emails for deduplication.
- * Returns a Set of email addresses already in any list for this client.
+ * Fetch ALL existing Brevo contact emails for global deduplication.
+ * Checks across ALL lists (not just this client) — no email gets sent twice, ever.
+ * Cached: only fetched once per run, shared across all clients.
  */
-async function getExistingEmails(clientSlug) {
+let _globalEmailCache = null;
+async function getExistingEmails() {
+  if (_globalEmailCache) return _globalEmailCache;
   const emails = new Set();
-  const lists = await getBrevoListsByPrefix(clientSlug);
-
-  for (const list of lists) {
-    let offset = 0;
-    const limit = 500;
-    while (true) {
-      try {
-        const data = await brevoFetch(`/contacts/lists/${list.id}/contacts?limit=${limit}&offset=${offset}`);
-        if (!data.contacts || data.contacts.length === 0) break;
-        for (const c of data.contacts) {
-          emails.add(c.email.toLowerCase());
-        }
-        offset += limit;
-        if (offset >= (data.count || 0)) break;
-      } catch { break; }
-    }
+  let offset = 0;
+  const limit = 500;
+  while (true) {
+    try {
+      const data = await brevoFetch(`/contacts?limit=${limit}&offset=${offset}`);
+      if (!data.contacts || data.contacts.length === 0) break;
+      for (const c of data.contacts) {
+        emails.add(c.email.toLowerCase());
+      }
+      offset += limit;
+      if (offset >= (data.count || 0)) break;
+      await sleep(300);
+    } catch { break; }
   }
-
+  _globalEmailCache = emails;
   return emails;
 }
 
@@ -389,7 +389,7 @@ async function lookupEmails(domains) {
 
     const lookups = batch.map(async (domain) => {
       try {
-        const res = await fetch('https://api.anymailfinder.com/v5.0/search/person.json', {
+        const res = await fetch('https://api.anymailfinder.com/v5.0/search/company.json', {
           method: 'POST',
           headers: {
             'X-Api-Key': ANYMAILFINDER_KEY,
@@ -400,12 +400,17 @@ async function lookupEmails(domains) {
 
         const data = await res.json();
 
-        if (data.email) {
-          const nameParts = (data.full_name || '').split(' ');
+        if (data.success && data.results?.emails?.length > 0) {
+          // Pick first personal email (skip generic addresses)
+          const generic = ['info@', 'contact@', 'support@', 'hello@', 'admin@', 'sales@', 'team@', 'help@'];
+          const personal = data.results.emails.find(e => !generic.some(g => e.toLowerCase().startsWith(g)));
+          const email = personal || data.results.emails[0];
+          const namePart = email.split('@')[0].split('.')[0];
+          const firstName = namePart.charAt(0).toUpperCase() + namePart.slice(1);
           return {
             domain,
-            email: data.email,
-            firstName: nameParts[0] || 'there',
+            email,
+            firstName: firstName || 'there',
           };
         }
         return null;
@@ -562,9 +567,9 @@ async function processClient(clientConfig, week, globalDedupeSet) {
     return { slug, name, status: 'skipped', remaining, newProspects: 0, reason: `${remaining} remaining >= ${REPLENISH_THRESHOLD} threshold` };
   }
 
-  // Step 2: Get existing emails for deduplication
+  // Step 2: Get existing emails for global deduplication (all clients, all lists)
   log('Loading existing emails for dedup...');
-  const existingEmails = await getExistingEmails(slug);
+  const existingEmails = await getExistingEmails();
   const existingDomains = new Set();
   for (const email of existingEmails) {
     const domain = email.split('@')[1];
