@@ -1,209 +1,332 @@
 /**
- * Daily Digest Agent
- * Generates daily/weekly summaries of all activity across clients
- * Includes Gmail inbox summary (unread count, replies needing attention, auto-replies sent)
+ * Daily Digest Agent — matches the original link-building-bot format
+ *
+ * Shows:
+ *   - Inbox opportunities (count by type)
+ *   - Last 24h email activity (received, sent, key emails)
+ *   - Weekend recap (Mondays only)
+ *   - Links placed this month per client (from MASTERSHEETS)
+ *   - Bot activity (outreach DB size)
+ *   - AI-generated action items (Claude Haiku)
  */
-const db = require('../shared/airtable');
+const Airtable = require('airtable');
 const slack = require('../shared/slack');
 const gmail = require('../shared/gmail');
+const ai = require('../shared/ai');
 
-// ── Gmail Inbox Summary ──────────────────────────────────────────────────────
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const MASTERSHEETS = 'appEGWJRxSrTv3IOL';
+const PROR_DB = process.env.AIRTABLE_BASE_ID || 'app3v0KJ4kQimscg3';
 
-async function getGmailSummary() {
+// ── Airtable direct fetch (for MASTERSHEETS cross-base queries) ─────────────
+
+async function atFetch(base, table, params = {}) {
+  const qs = new URLSearchParams();
+  if (params.filter) qs.set('filterByFormula', params.filter);
+  if (params.pageSize) qs.set('pageSize', String(params.pageSize));
+  if (params.fields) params.fields.forEach(f => qs.append('fields[]', f));
+  const url = `https://api.airtable.com/v0/${base}/${table}?${qs}`;
+  const r = await fetch(url, { headers: { Authorization: `Bearer ${AIRTABLE_API_KEY}` } });
+  return r.json();
+}
+
+// ── Inbox opportunities ─────────────────────────────────────────────────────
+
+async function getInboxOpportunities() {
   try {
-    // Run all Gmail queries in parallel
-    const [unreadCount, sentToday, recentMsgs] = await Promise.all([
-      gmail.getUnreadCount(),
-      gmail.getSentToday(),
-      gmail.getRecentMessages(1, 30),
-    ]);
+    const messages = await gmail.listMessages('is:unread', 30);
+    if (!messages.length) return { total: 0, replies: 0, inbound: 0 };
 
-    // Classify recent messages by type (quick heuristic — no AI call needed for digest)
-    let repliesNeedingAttention = 0;
-    let inboundPitches = 0;
-    const keyEmails = [];
-
-    for (const { id } of recentMsgs.slice(0, 15)) {
+    let replies = 0, inbound = 0;
+    for (const { id } of messages.slice(0, 10)) {
       try {
         const email = await gmail.getMessage(id);
         const subject = email.subject.toLowerCase();
-        const from = email.from.toLowerCase();
         const isReply = subject.startsWith('re:') || subject.includes('re:');
-        const isSpam = from.includes('noreply') || from.includes('no-reply') || from.includes('mailer-daemon');
-        const isInbound = !isReply && !isSpam && (
+        const isInbound = !isReply && (
           subject.includes('link') || subject.includes('guest post') ||
-          subject.includes('partnership') || subject.includes('content')
+          subject.includes('partnership') || subject.includes('collaboration')
         );
+        if (isReply) replies++;
+        if (isInbound) inbound++;
+      } catch { /* skip */ }
+    }
 
-        if (isReply && email.labelIds.includes('UNREAD')) repliesNeedingAttention++;
-        if (isInbound) inboundPitches++;
+    return { total: messages.length, replies, inbound };
+  } catch {
+    return { total: 0, replies: 0, inbound: 0 };
+  }
+}
 
-        if ((isReply || isInbound) && !isSpam) {
-          keyEmails.push({
-            from: email.from.replace(/<.*>/, '').trim().slice(0, 40),
-            subject: email.subject.slice(0, 60),
-            type: isReply ? 'reply' : 'inbound',
-          });
-        }
-      } catch { /* skip individual message errors */ }
+// ── Last 24h activity ───────────────────────────────────────────────────────
+
+async function getYesterdayActivity() {
+  try {
+    const recentMsgs = await gmail.getRecentMessages(1, 50);
+    const sentToday = await gmail.getSentToday();
+
+    const received = [];
+    for (const { id } of recentMsgs.slice(0, 20)) {
+      try {
+        const email = await gmail.getMessage(id);
+        const subject = email.subject.toLowerCase();
+        const from = email.from;
+        const isSpam = from.includes('noreply') || from.includes('no-reply') || from.includes('mailer-daemon');
+        const isReply = subject.startsWith('re:') || subject.includes('re:');
+        received.push({
+          from: email.from.replace(/<.*>/, '').trim().slice(0, 40),
+          subject: email.subject.slice(0, 60),
+          type: isSpam ? 'spam' : isReply ? 'reply' : 'inbound',
+        });
+      } catch { /* skip */ }
     }
 
     return {
-      unread: unreadCount,
-      autoRepliesSent: sentToday.length,
-      repliesNeedingAttention,
-      inboundPitches,
-      keyEmails: keyEmails.slice(0, 6),
+      received: received.length,
+      sent: sentToday.length,
+      replies: received.filter(e => e.type === 'reply').length,
+      inbound: received.filter(e => e.type === 'inbound').length,
+      spam: received.filter(e => e.type === 'spam').length,
+      recentEmails: received.filter(e => e.type !== 'spam').slice(0, 8),
     };
   } catch (err) {
-    console.error('[daily-digest] Gmail summary error:', err.message);
+    console.error('[daily-digest] getYesterdayActivity error:', err.message);
+    return { received: 0, sent: 0, replies: 0, inbound: 0, spam: 0, recentEmails: [] };
+  }
+}
+
+// ── Weekend recap (Mondays only) ────────────────────────────────────────────
+
+async function getWeekendRecap() {
+  const today = new Date();
+  if (today.getUTCDay() !== 1) return null; // Only on Mondays
+
+  try {
+    const messages = await gmail.getRecentMessages(3, 50);
+    if (!messages.length) return { total: 0, emails: [] };
+
+    const emails = [];
+    for (const { id } of messages.slice(0, 20)) {
+      try {
+        const email = await gmail.getMessage(id);
+        const subject = email.subject.toLowerCase();
+        const from = email.from;
+        const isReply = subject.startsWith('re:') || subject.includes('re:');
+        const isSpam = subject.includes('unsubscribe') || subject.includes('newsletter') ||
+          from.includes('noreply') || from.includes('no-reply') || from.includes('mailer-daemon');
+        const isInbound = !isReply && !isSpam && (
+          subject.includes('link') || subject.includes('guest post') ||
+          subject.includes('partnership') || subject.includes('collaboration') ||
+          subject.includes('content') || subject.includes('article')
+        );
+
+        let type = 'other';
+        if (isSpam) type = 'spam';
+        else if (isReply) type = 'reply';
+        else if (isInbound) type = 'inbound';
+
+        emails.push({
+          from: email.from.slice(0, 60),
+          subject: email.subject.slice(0, 80),
+          type,
+        });
+      } catch { /* skip */ }
+    }
+
+    return { total: messages.length, emails };
+  } catch {
     return null;
   }
 }
 
+// ── Client progress from MASTERSHEETS ───────────────────────────────────────
+
+async function getClientProgress() {
+  try {
+    const now = new Date();
+    const ym = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}`;
+    const F = {
+      client: 'fldRpfa8EfIV10uII',
+      linkOrders: 'fldY7yvdggN4MgWLp',
+      linksBuilt: 'fldP31u21GSAVl9NH',
+      linksToBuild: 'fld9T5M3Pg3LWmgPj',
+      yearMonth: 'fldaz1T5zAOyLQpjT',
+    };
+    const data = await atFetch(MASTERSHEETS, 'tbl5t5zpjIK8tySe7', {
+      filter: `{${F.yearMonth}}='${ym}'`,
+      fields: Object.values(F),
+      pageSize: 50,
+    });
+    return (data.records || [])
+      .filter(r => r.cellValuesByFieldId?.[F.client])
+      .map(r => {
+        const c = r.cellValuesByFieldId;
+        return {
+          name: c[F.client],
+          ordered: Number(c[F.linkOrders]) || 0,
+          built: Number(c[F.linksBuilt]) || 0,
+          remaining: Number(c[F.linksToBuild]) || 0,
+        };
+      });
+  } catch (err) {
+    console.error('[daily-digest] getClientProgress error:', err.message);
+    return [];
+  }
+}
+
+// ── Bot activity (outreach DB size) ─────────────────────────────────────────
+
+async function getBotActivity() {
+  try {
+    const data = await atFetch(PROR_DB, 'OUTREACH', { pageSize: 1 });
+    return { totalOutreach: data.totalRecords || 0 };
+  } catch {
+    return { totalOutreach: 0 };
+  }
+}
+
+// ── AI-generated action items ───────────────────────────────────────────────
+
+async function generateActionItems(clients, inbox) {
+  const context = {
+    clients: clients.map(c => ({
+      name: c.name,
+      placed: `${c.built}/${c.ordered}`,
+      remaining: c.remaining,
+      status: c.built >= c.ordered ? 'on_track' : c.remaining > 0 ? 'behind' : 'in_progress',
+    })),
+    inboxTotal: inbox.total,
+    inboxReplies: inbox.replies,
+  };
+
+  const prompt = `You are the daily briefing assistant for a link building agency. Generate 2-4 smart action items for Jeff based on this data. Focus on decisions that need human judgment — over-margin situations, schedule risks, opportunities. Be specific and direct. Max 12 words per item.
+
+Data: ${JSON.stringify(context)}
+
+Respond with ONLY a JSON array of strings, e.g.:
+["designscene.net quoted $320 vs $240 ceiling — 2 links ahead, find replacement?", "Kobo behind by 2 links with 8 days left — approve budget flex?"]`;
+
+  try {
+    const items = await ai.json(prompt, 'You are a concise briefing assistant.', { model: 'claude-haiku-4-5-20251001' });
+    return Array.isArray(items) ? items : [];
+  } catch {
+    return [];
+  }
+}
+
+// ── Build the digest message (matches original format) ──────────────────────
+
+function buildDigest(date, inbox, clients, activity, actionItems, weekendRecap, yesterday) {
+  const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  const d = new Date(date);
+  const dateStr = `${days[d.getDay()]}, ${months[d.getMonth()]} ${d.getDate()}`;
+
+  const lines = [`🌅 *PROR Daily Digest — ${dateStr}*`, ''];
+
+  // Inbox
+  const opTotal = inbox.replies + inbox.inbound;
+  lines.push(`📧 *Inbox — ${opTotal > 0 ? opTotal + ' opportunities' : 'all clear'}*`);
+  if (inbox.replies > 0) lines.push(`  • ↩️ ${inbox.replies} repl${inbox.replies === 1 ? 'y' : 'ies'} to outreach`);
+  if (inbox.inbound > 0) lines.push(`  • 📥 ${inbox.inbound} inbound pitch${inbox.inbound === 1 ? '' : 'es'}`);
+  const other = inbox.total - inbox.replies - inbox.inbound;
+  if (other > 0) lines.push(`  • 📬 ${other} other (processed)`);
+  if (opTotal === 0) lines.push(`  • Nothing actionable overnight`);
+  lines.push('');
+
+  // Yesterday's activity
+  if (yesterday && (yesterday.received > 0 || yesterday.sent > 0)) {
+    lines.push(`📬 *Last 24h Activity*`);
+    lines.push(`  • ${yesterday.received} emails received (${yesterday.replies} replies, ${yesterday.inbound} inbound, ${yesterday.spam} spam)`);
+    if (yesterday.sent > 0) lines.push(`  • ${yesterday.sent} auto-replies sent by bot`);
+    if (yesterday.recentEmails.length > 0) {
+      lines.push(`  *Key emails:*`);
+      for (const e of yesterday.recentEmails) {
+        const icon = e.type === 'reply' ? '↩️' : '📥';
+        lines.push(`    ${icon} ${e.from} — _${e.subject}_`);
+      }
+    }
+    lines.push('');
+  }
+
+  // Weekend recap (Mondays only)
+  if (weekendRecap && weekendRecap.total > 0) {
+    const wrReplies = weekendRecap.emails.filter(e => e.type === 'reply');
+    const wrInbound = weekendRecap.emails.filter(e => e.type === 'inbound');
+    const wrSpam = weekendRecap.emails.filter(e => e.type === 'spam');
+    const wrOther = weekendRecap.emails.filter(e => e.type === 'other');
+
+    lines.push(`📅 *Weekend Recap* (${weekendRecap.total} emails processed)`);
+    if (wrReplies.length > 0) {
+      lines.push(`  ↩️ *${wrReplies.length} replies:*`);
+      for (const e of wrReplies.slice(0, 5)) {
+        lines.push(`    • ${e.from} — _${e.subject}_`);
+      }
+      if (wrReplies.length > 5) lines.push(`    _...and ${wrReplies.length - 5} more_`);
+    }
+    if (wrInbound.length > 0) {
+      lines.push(`  📥 *${wrInbound.length} inbound:*`);
+      for (const e of wrInbound.slice(0, 5)) {
+        lines.push(`    • ${e.from} — _${e.subject}_`);
+      }
+    }
+    if (wrSpam.length > 0) lines.push(`  🗑️ ${wrSpam.length} spam/auto-reply (auto-handled)`);
+    if (wrOther.length > 0) lines.push(`  📬 ${wrOther.length} other`);
+    lines.push('');
+  }
+
+  // Client progress
+  if (clients.length > 0) {
+    lines.push(`🔗 *Links This Month*`);
+    for (const c of clients) {
+      const pct = c.ordered > 0 ? Math.round((c.built / c.ordered) * 100) : 0;
+      const bar = pct >= 100 ? '✅' : pct >= 60 ? '🟡' : '🔴';
+      lines.push(`  • ${bar} *${c.name}:* ${c.built}/${c.ordered} placed${c.remaining > 0 ? ` · ${c.remaining} pending` : ''}`);
+    }
+    lines.push('');
+  }
+
+  // Bot activity
+  lines.push(`📊 *Bot Activity*`);
+  lines.push(`  • ${activity.totalOutreach.toLocaleString()} total domains in outreach database`);
+  lines.push('');
+
+  // Action items
+  if (actionItems.length > 0) {
+    lines.push(`⚡ *Decisions needed:*`);
+    actionItems.forEach((item, i) => lines.push(`  ${i + 1}. ${item}`));
+  }
+
+  return lines.join('\n');
+}
+
+// ── Execute ─────────────────────────────────────────────────────────────────
+
 async function execute(args = {}) {
   const { channel } = args;
-  const targetChannel = channel || process.env.CHANNEL_COMMAND_CENTER;
+  const targetChannel = channel || process.env.CHANNEL_LINK_BUILDING || process.env.CHANNEL_COMMAND_CENTER;
 
   if (!targetChannel) {
-    console.error('No channel for digest — CHANNEL_COMMAND_CENTER not set');
+    console.error('No channel for digest — set CHANNEL_LINK_BUILDING or CHANNEL_COMMAND_CENTER');
     return;
   }
 
   try {
-    const today = new Date();
-    const dateStr = today.toISOString().split('T')[0];
-    const month = dateStr.slice(0, 7);
-    const dayOfMonth = today.getDate();
+    // Run all data fetches in parallel
+    const [inbox, clients, activity, weekendRecap, yesterday] = await Promise.all([
+      getInboxOpportunities(),
+      getClientProgress(),
+      getBotActivity(),
+      getWeekendRecap(),
+      getYesterdayActivity(),
+    ]);
 
-    const dayName = today.toLocaleDateString('en-US', { weekday: 'long' });
-    const monthName = today.toLocaleDateString('en-US', { month: 'long' });
+    // Generate AI action items (needs inbox + client data)
+    const actionItems = await generateActionItems(clients, inbox);
 
-    // Pull all data (Gmail summary runs in parallel with client data)
-    const gmailSummaryPromise = getGmailSummary();
-    const clients = await db.getClients();
-
-    if (!clients.length) {
-      await slack.post(targetChannel, `📊 *Daily Digest — ${monthName} ${dayOfMonth} (${dayName})*\n\nNo active clients. Add clients to Airtable to start tracking.`);
-      return;
-    }
-
-    // Gather per-client data
-    const clientData = [];
-    let totalLinksMonth = 0, totalLinksToday = 0;
-    let totalRedditPosted = 0, totalRedditDrafted = 0;
-    let totalRevenue = 0, totalCosts = 0;
-
-    for (const c of clients) {
-      const [links, reddit, finances] = await Promise.all([
-        db.getLinks(c.Name, { month }).catch(() => []),
-        db.getReddit(c.Name).catch(() => []),
-        db.getFinances({ client: c.Name, month }).catch(() => []),
-      ]);
-
-      const linksToday = links.filter(l => l['Date Placed'] === dateStr).length;
-      const linksMonth = links.length;
-      const redditPosted = reddit.filter(r => r.Status === 'Posted').length;
-      const redditDrafted = reddit.filter(r => r.Status === 'Drafted').length;
-      const revenue = finances.filter(f => f.Type === 'Revenue').reduce((s, f) => s + (f.Amount || 0), 0);
-      const costs = finances.filter(f => f.Type === 'Cost').reduce((s, f) => s + (f.Amount || 0), 0);
-
-      totalLinksMonth += linksMonth;
-      totalLinksToday += linksToday;
-      totalRedditPosted += redditPosted;
-      totalRedditDrafted += redditDrafted;
-      totalRevenue += revenue;
-      totalCosts += costs;
-
-      clientData.push({
-        name: c.Name,
-        linksToday,
-        linksMonth,
-        redditPosted,
-        redditDrafted,
-        revenue,
-        costs,
-        margin: revenue ? ((1 - costs / revenue) * 100).toFixed(1) : '0.0',
-        services: c.Services || 'N/A',
-      });
-    }
-
-    const totalMargin = totalRevenue ? ((1 - totalCosts / totalRevenue) * 100).toFixed(1) : '0.0';
-
-    // Resolve Gmail summary
-    const gmailSummary = await gmailSummaryPromise;
-
-    // Build digest message
-    let msg = `📊 *PROR Engine — Daily Digest*\n`;
-    msg += `_${monthName} ${dayOfMonth}, ${today.getFullYear()} (${dayName})_\n\n`;
-    msg += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-
-    // Gmail Inbox section
-    if (gmailSummary) {
-      msg += `📧 *Gmail Inbox*\n`;
-      msg += `• Unread: ${gmailSummary.unread}\n`;
-      if (gmailSummary.repliesNeedingAttention > 0) {
-        msg += `• ⚠️ ${gmailSummary.repliesNeedingAttention} replies needing attention\n`;
-      }
-      if (gmailSummary.inboundPitches > 0) {
-        msg += `• 📥 ${gmailSummary.inboundPitches} inbound pitches\n`;
-      }
-      msg += `• 🤖 ${gmailSummary.autoRepliesSent} auto-replies sent today\n`;
-      if (gmailSummary.keyEmails.length > 0) {
-        msg += `  _Key emails:_\n`;
-        for (const e of gmailSummary.keyEmails) {
-          const icon = e.type === 'reply' ? '↩️' : '📥';
-          msg += `    ${icon} ${e.from} — _${e.subject}_\n`;
-        }
-      }
-      msg += '\n';
-    }
-
-    // Links section
-    msg += `🔗 *Link Building*\n`;
-    msg += `• Today: ${totalLinksToday} links placed\n`;
-    msg += `• MTD: ${totalLinksMonth} links\n\n`;
-
-    // Reddit section
-    msg += `💬 *Reddit*\n`;
-    msg += `• Posted: ${totalRedditPosted} comments/posts\n`;
-    msg += `• Pending review: ${totalRedditDrafted} drafts\n\n`;
-
-    // Finances
-    msg += `💰 *Financials (${monthName})*\n`;
-    msg += `• Revenue: $${totalRevenue.toLocaleString()}\n`;
-    msg += `• Costs: $${totalCosts.toLocaleString()}\n`;
-    msg += `• Margin: ${totalMargin}%\n\n`;
-
-    msg += `━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-
-    // Client breakdown
-    msg += `📋 *Client Breakdown*\n\n`;
-    for (const cd of clientData) {
-      const statusIcon = cd.revenue > 0 ? '✅' : '⬜';
-      msg += `*${cd.name}:* ${cd.linksMonth} links, ${cd.redditPosted} reddit posted`;
-      if (cd.revenue > 0) msg += ` | $${cd.revenue.toLocaleString()} rev`;
-      msg += ` ${statusIcon}\n`;
-    }
-
-    // Action items
-    const actionItems = [];
-    if (totalRedditDrafted > 0) actionItems.push(`${totalRedditDrafted} Reddit drafts pending QA review`);
-    for (const cd of clientData) {
-      if (cd.linksMonth === 0 && cd.services?.includes('link')) {
-        actionItems.push(`${cd.name}: No links placed yet this month`);
-      }
-    }
-
-    if (actionItems.length) {
-      msg += `\n━━━━━━━━━━━━━━━━━━━━━━\n\n`;
-      msg += `⚠️ *Action Items*\n`;
-      for (const item of actionItems) {
-        msg += `• ${item}\n`;
-      }
-    }
-
-    await slack.post(targetChannel, msg);
+    // Build and send
+    const message = buildDigest(new Date(), inbox, clients, activity, actionItems, weekendRecap, yesterday);
+    await slack.post(targetChannel, message);
 
   } catch (err) {
     console.error('Digest error:', err);
