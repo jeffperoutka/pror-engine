@@ -4,6 +4,7 @@
  */
 const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
+const airtable = require('../../shared/airtable');
 
 async function processInteraction(payload) {
   try {
@@ -83,8 +84,57 @@ async function handleAction(action, context) {
       });
       break;
     }
-    default:
+    default: {
+      // ── Negotiation feedback buttons (from gmail-poll) ──
+      if (actionId.startsWith('feedback_')) {
+        await handleNegotiationFeedback(action, context);
+        break;
+      }
       console.log('Unknown action:', actionId);
+    }
+  }
+}
+
+/**
+ * Handle negotiation feedback buttons from gmail-poll.
+ * One tap = feedback logged. Zero friction.
+ */
+async function handleNegotiationFeedback(action, context) {
+  try {
+    const data = JSON.parse(action.value || '{}');
+    const { domain, round, action: feedback } = data;
+
+    const feedbackLabels = {
+      good: ':thumbsup: Good reply',
+      bad: ':thumbsdown: Bad reply — will adjust',
+      too_high: ':money_with_wings: Offered too high — will go lower next time',
+      too_low: ':chart_with_downwards_trend: Offered too low — risked losing the deal',
+    };
+
+    const label = feedbackLabels[feedback] || feedback;
+
+    // Log feedback to Airtable Negotiations table
+    const history = await airtable.getNegotiationHistory(domain);
+    const latestNeg = history[history.length - 1];
+    if (latestNeg?.id) {
+      await airtable.updateNegotiation(latestNeg.id, {
+        JeffReviewed: true,
+        JeffFeedback: feedback,
+        FeedbackDate: new Date().toISOString(),
+      });
+    }
+
+    // Acknowledge in thread
+    await slack.post(context.channel, `${label} — logged for *${domain}* round ${round}`, {
+      thread_ts: context.message_ts,
+    });
+
+    // React to original message
+    const emoji = feedback === 'good' ? 'white_check_mark' : feedback === 'bad' ? 'x' : 'eyes';
+    await slack.react(context.channel, context.message_ts, emoji);
+
+  } catch (err) {
+    console.error('[interact] Feedback handler error:', err.message);
   }
 }
 

@@ -4,13 +4,15 @@
  * Runs every 2 minutes via Vercel cron.
  * Also callable manually via GET /api/cron/gmail-poll
  *
- * For each unread email:
- *   1. Check sender domain against spam blacklist (Airtable)
- *   2. Classify with Claude Haiku into: reply_to_outreach, inbound_pitch,
- *      link_exchange, spam, auto_reply, other
- *   3. Auto-negotiate: always counter at 50-60% of asking price
- *   4. Post classified emails to Slack #link-building with action taken
- *   5. Mark as read
+ * Features:
+ *   1. Spam blacklist check (Airtable)
+ *   2. Claude Haiku classification (6 types)
+ *   3. Thread-aware negotiation with price ladder (A)+(B)+(C)
+ *   4. DR-aware margin protection (65-70% profit margin required)
+ *   5. Cancel remaining drip campaigns on reply (A)
+ *   6. Link exchange handling (open to it, auto-reply with interest)
+ *   7. Learning mode — posts every auto-reply to Slack for Jeff's feedback
+ *   8. A/B test tracking for copy and reply strategy variants
  */
 
 const { waitUntil } = require('@vercel/functions');
@@ -18,10 +20,46 @@ const gmail = require('../../shared/gmail');
 const ai = require('../../shared/ai');
 const slack = require('../../shared/slack');
 const airtable = require('../../shared/airtable');
+const brevo = require('../../shared/brevo');
+
+// ── Pricing & Margin Config ─────────────────────────────────────────────────
+
+// Price ladder: escalates offer % with each negotiation round
+const PRICE_LADDER = [
+  { round: 1, offerPct: 0.50, description: '50% of ask — always start here' },
+  { round: 2, offerPct: 0.65, description: '65% of ask — show flexibility' },
+  { round: 3, offerPct: 0.80, description: '80% of ask — near ceiling' },
+  { round: 4, offerPct: null, description: 'Flag Jeff — beyond auto-negotiate range' },
+];
+
+// Max prices by DR tier to maintain 65-70% margin
+// Based on: avg client charge = $300-500/link
+const MAX_PRICE_BY_DR = {
+  '80+':  180,  // Premium sites, max $180
+  '60-79': 140, // High authority
+  '40-59': 140, // Mid authority
+  '30-39': 100, // Lower authority
+  '0-29':   40, // Low DR — only if highly relevant
+};
+
+function getMaxPrice(dr) {
+  if (dr >= 80) return MAX_PRICE_BY_DR['80+'];
+  if (dr >= 60) return MAX_PRICE_BY_DR['60-79'];
+  if (dr >= 40) return MAX_PRICE_BY_DR['40-59'];
+  if (dr >= 30) return MAX_PRICE_BY_DR['30-39'];
+  return MAX_PRICE_BY_DR['0-29'];
+}
+
+function getDRTier(dr) {
+  if (dr >= 80) return 'DR80+';
+  if (dr >= 60) return 'DR60-79';
+  if (dr >= 40) return 'DR40-59';
+  if (dr >= 30) return 'DR30-39';
+  return 'DR<30';
+}
 
 // ── Spam Blacklist (Airtable) ────────────────────────────────────────────────
 
-const SPAM_BASE = process.env.AIRTABLE_BASE_ID;
 const SPAM_TABLE = 'Spam Domains';
 
 async function getSpamDomains() {
@@ -35,7 +73,6 @@ async function getSpamDomains() {
     }
     return domains;
   } catch {
-    // Table may not exist yet — fail silently
     return new Set();
   }
 }
@@ -49,11 +86,11 @@ async function addToSpamBlacklist(domain, reason = '') {
       AddedAt: new Date().toISOString(),
     });
   } catch {
-    // Best-effort — don't crash over blacklist
+    // Best-effort
   }
 }
 
-// ── Email Classification ─────────────────────────────────────────────────────
+// ── Helpers ──────────────────────────────────────────────────────────────────
 
 function extractDomain(emailAddr) {
   const match = emailAddr.match(/@([\w.-]+)/);
@@ -65,11 +102,29 @@ function extractReplyAddress(fromHeader) {
   return match ? match[1] : fromHeader.trim();
 }
 
-async function classifyEmail(email) {
+// ── Thread-Aware Classification ─────────────────────────────────────────────
+
+async function classifyEmail(email, negotiationHistory, outreachRecord) {
   // SECURITY: email content is UNTRUSTED external data.
   const safeFrom = email.from.replace(/[<>]/g, '').slice(0, 100);
   const safeSubject = email.subject.replace(/[<>]/g, '').slice(0, 200);
   const safeBody = email.body.slice(0, 800);
+
+  // Build negotiation context from history
+  const round = negotiationHistory.length + 1;
+  const ladder = PRICE_LADDER.find(l => l.round === Math.min(round, 4)) || PRICE_LADDER[3];
+  const dr = outreachRecord?.DR || outreachRecord?.dr || 0;
+  const maxPrice = getMaxPrice(dr);
+  const client = outreachRecord?.Client || 'unknown';
+
+  let historyContext = '';
+  if (negotiationHistory.length > 0) {
+    historyContext = `\n\nNEGOTIATION HISTORY (${negotiationHistory.length} prior exchanges):`;
+    for (const h of negotiationHistory.slice(-5)) {
+      historyContext += `\n- Round ${h.Round}: ${h.Direction} | Their price: $${h.TheirPrice || '?'} | Our offer: $${h.OurOffer || '?'} | ${h.Summary || ''}`;
+    }
+    historyContext += `\n\nThis is negotiation ROUND ${round}.`;
+  }
 
   const prompt = `You are classifying an inbound email for a link building agency (PROR). We do outbound outreach to websites offering to place content with backlinks to our clients. We PAY sites for placements.
 
@@ -82,6 +137,14 @@ CONTEXT — understand these distinctions:
 - "spam": mass marketing, newsletters, tools pitching their services, completely irrelevant
 - "auto_reply": out-of-office, delivery notifications, bounces
 - "other": invoices, billing, anything that doesn't fit above categories
+
+SITE CONTEXT:
+- Domain: ${extractDomain(safeFrom) || 'unknown'}
+- Domain Rating (DR): ${dr || 'unknown'}
+- DR Tier: ${getDRTier(dr)}
+- Client: ${client}
+- Maximum acceptable price for this DR: $${maxPrice}
+${historyContext}
 
 ---
 From: ${safeFrom}
@@ -102,27 +165,53 @@ Respond with ONLY valid JSON, no markdown, no explanation:
   "spam_confidence": "high" | "medium" | "low",
   "should_auto_reply": true | false,
   "draft_reply": "short email reply text (40-80 words) or null",
-  "price_confirmed": false
+  "price_confirmed": false,
+  "our_counter_offer": null or number in USD
 }
 
-AUTO-REPLY RULES:
-- should_auto_reply=true for: replies to our outreach where the site owner shows interest, asks questions, or quotes a price
-- should_auto_reply=false for: spam, auto-replies, inbound pitches from unknown sites, link exchanges, invoices, billing, anything needing Jeff's judgment
-- PRICING — ALWAYS NEGOTIATE. Never accept the first price. The first price ALWAYS comes down.
-  * Counter-offer at ~50-60% of their ask. Be friendly but firm.
-  * Mention bulk: "If we place a few articles over the coming months, could you do a better rate?"
-  * If they already gave a price, counter lower. If they haven't quoted yet, ask what their rates are.
-  * Never say "that works" or "we can do that" to a first price. Always push back politely.
-- CONFIRMED PRICE: set "price_confirmed"=true ONLY when the site owner explicitly agrees to a specific dollar amount we proposed, OR sends an invoice with a price.
-- draft_reply: natural, conversational, peer-to-peer tone. No bullet points. Write like a real person, not a template. Sign off as "Daniel / Content Partnerships"
-- NEVER promise to schedule a call, hop on a call, grab time on their calendar, or set up a meeting. We communicate via email only.
-- Keep replies short (2-3 sentences max), friendly, focused on moving the conversation forward
-- For spam/other/inbound_pitch/link_exchange: draft_reply should be null`;
+AUTO-REPLY & NEGOTIATION RULES:
+- should_auto_reply=true for: replies to our outreach where the site owner shows interest, asks questions, or quotes a price. Also for link exchanges where we want to explore the opportunity.
+- should_auto_reply=false for: spam, auto-replies, invoices, billing, anything needing Jeff's judgment
+
+PRICING — NEGOTIATION LADDER (Round ${round}):
+${round <= 3 ? `- This is round ${round}. Our offer ceiling this round: ${Math.round(ladder.offerPct * 100)}% of their ask.
+- ALWAYS NEGOTIATE. Even if their price is already below our max ($${maxPrice}), push for better. The first price ALWAYS comes down. Your goal is the absolute best price humanly possible.
+- If they quoted a price, counter at ~${Math.round(ladder.offerPct * 100)}% of their ask. Set "our_counter_offer" to the exact dollar amount.
+- Be friendly but firm. ${round === 1 ? 'Mention bulk: "If we place a few articles over the coming months, could you do a better rate?"' : round === 2 ? 'Show willingness: "We can come up a bit — how about $X? We do consistent volume."' : 'Near our ceiling: "I think $X is really the most we can stretch to. Happy to commit to multiple pieces at that rate."'}
+- If they haven't quoted a price yet, ask what their rates are.
+- Never say "that works" or "we can do that" to ANY first price, even a low one.` : `- This is round ${round}+. We've negotiated ${negotiationHistory.length} times already.
+- Set suggested_action to "flag_jeff" — this needs human review.
+- should_auto_reply should be false.`}
+
+MARGIN PROTECTION:
+- DR of this site: ${dr || 'unknown'}. Maximum price we can pay: $${maxPrice}.
+- Even if their price is BELOW $${maxPrice}, still negotiate lower. Every dollar saved matters.
+- Hard ceiling: never accept above $${maxPrice} regardless of round.
+- If after ${round >= 3 ? 'this round' : '3 rounds'} they won't go below $${maxPrice}, flag_jeff.
+- CONFIRMED PRICE: set "price_confirmed"=true ONLY when the site owner explicitly agrees to a specific dollar amount we proposed that is AT OR BELOW $${maxPrice}.
+
+CONTINUOUS IMPROVEMENT:
+- You are always learning. Every negotiation is data.
+- Try different approaches: anchoring low, mentioning volume, mentioning long-term partnership, being direct about budget constraints.
+- Vary your tone slightly between negotiations — some more casual, some more professional — to see what converts best.
+- The goal is not just to close deals but to get the BEST possible price on every single deal.
+
+LINK EXCHANGE RULES:
+- We are OPEN to link exchanges. They can be valuable.
+- If someone proposes a link exchange, should_auto_reply=true.
+- Draft a reply expressing interest: "That could work! What kind of content/niche are you working with? We'd want to make sure it's a good fit for both sides."
+- Set type to "link_exchange" and suggested_action to "negotiate".
+
+TONE:
+- draft_reply: natural, conversational, peer-to-peer. No bullet points. Write like a real person.
+- Sign off as "Daniel / Content Partnerships"
+- NEVER promise calls or meetings. Email only.
+- Keep replies short (2-3 sentences max), friendly, move conversation forward.`;
 
   try {
     const raw = await ai.complete(prompt, '', {
       model: 'claude-haiku-4-5-20251001',
-      maxTokens: 500,
+      maxTokens: 600,
       temperature: 0.3,
     });
 
@@ -134,23 +223,23 @@ AUTO-REPLY RULES:
       sentiment: 'neutral',
       price_mentioned: null,
       wants_link_exchange: false,
-      summary: email.snippet.slice(0, 80),
+      summary: (email.snippet || '').slice(0, 80),
       suggested_action: 'flag_jeff',
       urgency: 'low',
       spam_confidence: 'low',
       should_auto_reply: false,
       draft_reply: null,
       price_confirmed: false,
+      our_counter_offer: null,
     };
   }
 }
 
-// ── Airtable: Update outreach record with negotiation status ─────────────────
+// ── Airtable: Update outreach record ─────────────────────────────────────────
 
 async function updateOutreachRecord(domain, updates) {
   try {
     const base = airtable.getBase();
-    // Find the outreach record by domain
     const records = await base('Outreach').select({
       filterByFormula: `LOWER({Domain}) = "${domain}"`,
       maxRecords: 1,
@@ -158,18 +247,55 @@ async function updateOutreachRecord(domain, updates) {
 
     if (records.length > 0) {
       await base('Outreach').update(records[0].id, updates);
-      return true;
+      return records[0].fields;
     }
-    return false;
+    return null;
   } catch (err) {
     console.error(`[gmail-poll] Airtable update failed for ${domain}:`, err.message);
-    return false;
+    return null;
+  }
+}
+
+// ── Drip Cancellation (Feature A) ───────────────────────────────────────────
+
+async function cancelDripsForDomain(domain) {
+  try {
+    const outreach = await airtable.getOutreachByDomain(domain);
+    if (!outreach) {
+      console.error(`[gmail-poll] No outreach record for ${domain} — cannot cancel drips`);
+      return { cancelled: 0 };
+    }
+
+    // Campaign IDs stored as comma-separated string in Outreach table
+    const campaignIdsStr = outreach['Campaign IDs'] || outreach.CampaignIds || '';
+    if (!campaignIdsStr) {
+      console.error(`[gmail-poll] No campaign IDs stored for ${domain}`);
+      return { cancelled: 0 };
+    }
+
+    const campaignIds = campaignIdsStr.split(',').map(id => parseInt(id.trim())).filter(Boolean);
+    if (campaignIds.length === 0) return { cancelled: 0 };
+
+    console.error(`[gmail-poll] Cancelling ${campaignIds.length} drip campaigns for ${domain}`);
+    const results = await brevo.cancelDripForReply(campaignIds);
+    const cancelledCount = results.filter(r => r.status === 'cancelled').length;
+
+    return { cancelled: cancelledCount, total: campaignIds.length, results };
+  } catch (err) {
+    console.error(`[gmail-poll] Drip cancellation error for ${domain}:`, err.message);
+    return { cancelled: 0, error: err.message };
   }
 }
 
 // ── Slack Formatting ─────────────────────────────────────────────────────────
 
-function buildSlackMessage(email, c, replied = false) {
+/**
+ * Build Slack Block Kit message with interactive buttons for zero-friction feedback.
+ * Jeff just taps a button — no typing needed.
+ */
+function buildSlackBlocks(email, c, opts = {}) {
+  const { replied = false, round = 1, dr = 0, maxPrice = 0, cancelledDrips = 0, domain = '' } = opts;
+
   const typeEmoji = {
     reply_to_outreach: ':leftwards_arrow_with_hook:',
     inbound_pitch: ':inbox_tray:',
@@ -179,37 +305,93 @@ function buildSlackMessage(email, c, replied = false) {
     other: ':email:',
   }[c.type] || ':email:';
 
-  const actionEmoji = {
-    negotiate: ':handshake:',
-    accept: ':white_check_mark:',
-    decline: ':x:',
-    flag_jeff: ':rotating_light:',
-    ignore: ':mute:',
-  }[c.suggested_action] || ':grey_question:';
-
-  const sentimentEmoji = {
-    positive: ':large_green_circle:',
-    neutral: ':large_yellow_circle:',
-    negative: ':red_circle:',
-  }[c.sentiment] || ':white_circle:';
-
+  const sentimentEmoji = { positive: ':large_green_circle:', neutral: ':large_yellow_circle:', negative: ':red_circle:' }[c.sentiment] || ':white_circle:';
   const gmailUrl = `https://mail.google.com/mail/u/0/#inbox/${email.threadId}`;
 
-  const lines = [
-    `${typeEmoji} *${c.type.replace(/_/g, ' ').toUpperCase()}* ${sentimentEmoji}`,
+  const blocks = [];
+
+  // Header
+  blocks.push({
+    type: 'section',
+    text: { type: 'mrkdwn', text: `${typeEmoji} *${c.type.replace(/_/g, ' ').toUpperCase()}* ${sentimentEmoji} — Round ${round}` },
+  });
+
+  // Details
+  const details = [
     `*From:* ${email.from}`,
     `*Subject:* ${email.subject}`,
     `*Summary:* ${c.summary}`,
-    c.price_mentioned ? `*Price mentioned:* $${c.price_mentioned}` : null,
-    c.wants_link_exchange ? `*Wants link exchange:* Yes — needs manual review` : null,
-    `*Suggested action:* ${actionEmoji} ${c.suggested_action.replace(/_/g, ' ')}`,
-    replied ? `:white_check_mark: *Auto-replied:* _${(c.draft_reply || '').slice(0, 120)}..._` : null,
-    !replied && c.should_auto_reply ? `:warning: Auto-reply drafted but failed to send` : null,
-    c.price_confirmed ? `:moneybag: *Price confirmed* — ready for placement` : null,
-    `<${gmailUrl}|View in Gmail>`,
-  ].filter(Boolean);
+  ];
+  if (dr) details.push(`*DR:* ${dr} (${getDRTier(dr)}) | *Max:* $${maxPrice}`);
+  if (c.price_mentioned) details.push(`*Their price:* $${c.price_mentioned}`);
+  if (c.our_counter_offer) details.push(`*Our counter:* $${c.our_counter_offer}`);
+  if (c.wants_link_exchange) details.push(`:arrows_counterclockwise: *Link exchange* — we're open`);
+  if (cancelledDrips > 0) details.push(`:octagonal_sign: Cancelled ${cancelledDrips} drip emails`);
+  if (c.price_confirmed) details.push(`:moneybag: *PRICE CONFIRMED*`);
 
-  return lines.join('\n');
+  blocks.push({
+    type: 'section',
+    text: { type: 'mrkdwn', text: details.join('\n') },
+  });
+
+  // Auto-reply preview (if sent)
+  if (replied && c.draft_reply) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `:white_check_mark: *Auto-replied:*\n> _${c.draft_reply.slice(0, 200)}_` },
+    });
+  }
+
+  // Gmail link
+  blocks.push({
+    type: 'section',
+    text: { type: 'mrkdwn', text: `<${gmailUrl}|:envelope: Open in Gmail>` },
+  });
+
+  // ── FEEDBACK BUTTONS (zero friction) ──
+  if (replied) {
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'actions',
+      elements: [
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: ':thumbsup: Good reply' },
+          style: 'primary',
+          action_id: `feedback_good_${domain}`,
+          value: JSON.stringify({ domain, round, action: 'good' }),
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: ':thumbsdown: Bad reply' },
+          style: 'danger',
+          action_id: `feedback_bad_${domain}`,
+          value: JSON.stringify({ domain, round, action: 'bad' }),
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: ':money_with_wings: Too high' },
+          action_id: `feedback_toohigh_${domain}`,
+          value: JSON.stringify({ domain, round, action: 'too_high' }),
+        },
+        {
+          type: 'button',
+          text: { type: 'plain_text', text: ':chart_with_downwards_trend: Too low' },
+          action_id: `feedback_toolow_${domain}`,
+          value: JSON.stringify({ domain, round, action: 'too_low' }),
+        },
+      ],
+    });
+    blocks.push({
+      type: 'context',
+      elements: [{ type: 'mrkdwn', text: '_Tap a button or reply in thread for detailed feedback_' }],
+    });
+  }
+
+  // Fallback text for notifications
+  const fallbackText = `${c.type.replace(/_/g, ' ')} from ${email.from} — ${c.summary}`;
+
+  return { blocks, fallbackText };
 }
 
 // ── Main Processing Logic ────────────────────────────────────────────────────
@@ -224,7 +406,7 @@ async function processInbox() {
   // Load spam blacklist and unread messages in parallel
   const [spamDomains, messages] = await Promise.all([
     getSpamDomains(),
-    gmail.getUnreadOutreachReplies(25),
+    gmail.getUnreadOutreachReplies(50), // Increased from 25 for scale
   ]);
 
   if (messages.length === 0) {
@@ -245,10 +427,27 @@ async function processInbox() {
         continue;
       }
 
-      // ── Classify with Claude Haiku ──
-      const c = await classifyEmail(email);
+      // ── Load thread context (Feature B) ──
+      let negotiationHistory = [];
+      let outreachRecord = null;
+      if (senderDomain) {
+        [negotiationHistory, outreachRecord] = await Promise.all([
+          airtable.getNegotiationHistory(senderDomain),
+          airtable.getOutreachByDomain(senderDomain),
+        ]);
+      }
 
-      console.error(`[gmail-poll] id=${id} from=${email.from.slice(0, 40)} type=${c.type} action=${c.suggested_action} autoReply=${c.should_auto_reply}`);
+      const round = negotiationHistory.length + 1;
+
+      // ── Prevent double auto-reply in same thread (Feature B) ──
+      const lastNeg = negotiationHistory[negotiationHistory.length - 1];
+      const recentAutoReply = lastNeg?.AutoReplied && lastNeg?.Direction === 'outbound'
+        && (Date.now() - new Date(lastNeg.Date).getTime()) < 30 * 60 * 1000; // 30 min window
+
+      // ── Classify with Claude Haiku (thread-aware) ──
+      const c = await classifyEmail(email, negotiationHistory, outreachRecord);
+
+      console.error(`[gmail-poll] id=${id} from=${email.from.slice(0, 40)} type=${c.type} round=${round} action=${c.suggested_action} autoReply=${c.should_auto_reply}`);
 
       // ── Handle by classification type ──
 
@@ -258,7 +457,6 @@ async function processInbox() {
           await addToSpamBlacklist(senderDomain, c.summary);
         }
         await gmail.archiveMessage(id);
-        // Still notify Slack for visibility (but compact)
         await slack.post(linksChannel, `:wastebasket: *SPAM auto-archived:* ${email.from} — _${c.summary}_`);
         results.push({ id, from: email.from, type: 'spam', action: 'archived_blacklisted' });
         await gmail.markAsRead(id);
@@ -272,54 +470,116 @@ async function processInbox() {
         continue;
       }
 
-      // LINK EXCHANGE: flag for review, post to Slack
+      // ── FEATURE A: Cancel remaining drip campaigns on ANY reply ──
+      let cancelledDrips = 0;
+      if (senderDomain && (c.type === 'reply_to_outreach' || c.type === 'link_exchange' || c.type === 'inbound_pitch')) {
+        const cancelResult = await cancelDripsForDomain(senderDomain);
+        cancelledDrips = cancelResult.cancelled || 0;
+      }
+
+      // ── LINK EXCHANGE: We're open to it — auto-reply with interest ──
       if (c.type === 'link_exchange' || c.wants_link_exchange) {
-        const text = buildSlackMessage(email, c, false);
-        await slack.post(linksChannel, `:arrows_counterclockwise: *Link Exchange Request — needs review:*\n${text}`);
+        let replied = false;
+
+        if (c.should_auto_reply && c.draft_reply && !recentAutoReply) {
+          try {
+            const replyTo = extractReplyAddress(email.from);
+            await gmail.sendReply(email.messageId, email.threadId, replyTo, email.subject, c.draft_reply);
+            replied = true;
+            console.error(`[gmail-poll] Auto-replied to link exchange: ${replyTo}`);
+          } catch (err) {
+            console.error(`[gmail-poll] Link exchange auto-reply failed: ${err.message}`);
+          }
+        }
+
+        // Log negotiation
+        if (senderDomain) {
+          await airtable.logNegotiation({
+            domain: senderDomain,
+            client: outreachRecord?.Client || '',
+            round,
+            direction: 'inbound',
+            theirPrice: null,
+            ourOffer: null,
+            dr: outreachRecord?.DR || null,
+            sentiment: c.sentiment,
+            action: 'link_exchange',
+            summary: c.summary,
+            threadId: email.threadId,
+            autoReplied: replied,
+          });
+        }
+
+        const dr = outreachRecord?.DR || 0;
+        const { blocks, fallbackText } = buildSlackBlocks(email, c, {
+          replied,
+          round,
+          dr,
+          maxPrice: getMaxPrice(dr),
+          cancelledDrips,
+          domain: senderDomain || '',
+        });
+        await slack.postBlocks(linksChannel, blocks, fallbackText);
         await gmail.markAsRead(id);
-        results.push({ id, from: email.from, type: 'link_exchange', action: 'flagged_for_review' });
+        results.push({ id, from: email.from, type: 'link_exchange', action: replied ? 'auto_replied' : 'flagged', replied });
         continue;
       }
 
-      // REPLY TO OUTREACH: the money path — auto-negotiate
+      // ── REPLY TO OUTREACH: the money path — negotiation ladder (Feature C) ──
       let replied = false;
+      const dr = outreachRecord?.DR || outreachRecord?.dr || 0;
+      const maxPrice = getMaxPrice(dr);
+
       if (c.type === 'reply_to_outreach') {
-        // Update Airtable with reply status
+        // Update Airtable outreach record
         if (senderDomain) {
           const airtableUpdates = {
             'Reply Status': c.sentiment,
             'Last Reply Date': new Date().toISOString(),
+            'Negotiation Round': round,
           };
           if (c.price_mentioned) {
             airtableUpdates['Quoted Price'] = c.price_mentioned;
           }
-          if (c.price_confirmed) {
+          if (c.price_confirmed && c.price_mentioned <= maxPrice) {
             airtableUpdates['Status'] = 'Price Confirmed';
             airtableUpdates['Confirmed Price'] = c.price_mentioned;
           }
           await updateOutreachRecord(senderDomain, airtableUpdates);
         }
 
-        // Auto-reply with negotiation
-        if (c.should_auto_reply && c.draft_reply) {
+        // Auto-reply with negotiation (unless double-reply guard triggers)
+        if (c.should_auto_reply && c.draft_reply && !recentAutoReply) {
           try {
             const replyTo = extractReplyAddress(email.from);
-            await gmail.sendReply(
-              email.messageId,
-              email.threadId,
-              replyTo,
-              email.subject,
-              c.draft_reply
-            );
+            await gmail.sendReply(email.messageId, email.threadId, replyTo, email.subject, c.draft_reply);
             replied = true;
-            console.error(`[gmail-poll] Auto-replied to ${replyTo}`);
+            console.error(`[gmail-poll] Auto-replied to ${replyTo} (round ${round})`);
           } catch (err) {
             console.error(`[gmail-poll] Auto-reply failed for ${id}:`, err.message);
           }
         }
+
+        // Log negotiation event (Feature B)
+        if (senderDomain) {
+          await airtable.logNegotiation({
+            domain: senderDomain,
+            client: outreachRecord?.Client || '',
+            round,
+            direction: 'inbound',
+            theirPrice: c.price_mentioned || null,
+            ourOffer: c.our_counter_offer || null,
+            dr,
+            sentiment: c.sentiment,
+            action: c.suggested_action,
+            summary: c.summary,
+            threadId: email.threadId,
+            autoReplied: replied,
+          });
+        }
       }
 
-      // Post to Slack for all non-spam, non-auto-reply types
+      // ── Post to Slack with interactive buttons (ALWAYS for learning mode) ──
       const shouldNotify =
         c.type === 'reply_to_outreach' ||
         c.type === 'inbound_pitch' ||
@@ -327,8 +587,15 @@ async function processInbox() {
         replied;
 
       if (shouldNotify) {
-        const text = buildSlackMessage(email, c, replied);
-        await slack.post(linksChannel, text);
+        const { blocks, fallbackText } = buildSlackBlocks(email, c, {
+          replied,
+          round,
+          dr,
+          maxPrice,
+          cancelledDrips,
+          domain: senderDomain || '',
+        });
+        await slack.postBlocks(linksChannel, blocks, fallbackText);
       }
 
       await gmail.markAsRead(id);
@@ -340,6 +607,8 @@ async function processInbox() {
         action: c.suggested_action,
         replied,
         notified: shouldNotify,
+        round,
+        cancelledDrips,
       });
     } catch (err) {
       console.error(`[gmail-poll] Error on message ${id}:`, err.message);

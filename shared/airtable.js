@@ -214,6 +214,114 @@ async function deleteRule(ruleId) {
   return { deleted: true, id: ruleId };
 }
 
+// ========== OUTREACH / NEGOTIATIONS ==========
+
+/**
+ * Get outreach record by sender domain — includes campaign IDs for drip cancellation
+ */
+async function getOutreachByDomain(domain) {
+  const base = getBase();
+  const records = await base('Outreach').select({
+    filterByFormula: `LOWER({Domain}) = "${domain.toLowerCase().replace(/"/g, '\\"')}"`,
+    maxRecords: 1,
+  }).all();
+  return records[0] ? { id: records[0].id, ...records[0].fields } : null;
+}
+
+/**
+ * Get negotiation history for a thread (by domain or thread ID)
+ */
+async function getNegotiationHistory(domain) {
+  const base = getBase();
+  try {
+    const records = await base('Negotiations').select({
+      filterByFormula: `LOWER({Domain}) = "${domain.toLowerCase().replace(/"/g, '\\"')}"`,
+      sort: [{ field: 'Date', direction: 'asc' }],
+    }).all();
+    return records.map(r => ({ id: r.id, ...r.fields }));
+  } catch {
+    // Table may not exist yet
+    return [];
+  }
+}
+
+/**
+ * Log a negotiation event (each email exchange = one record)
+ */
+async function logNegotiation(data) {
+  const base = getBase();
+  try {
+    const record = await base('Negotiations').create({
+      Domain: data.domain,
+      Client: data.client || '',
+      Round: data.round || 1,
+      Direction: data.direction, // 'inbound' or 'outbound'
+      TheirPrice: data.theirPrice || null,
+      OurOffer: data.ourOffer || null,
+      DR: data.dr || null,
+      Sentiment: data.sentiment || 'neutral',
+      Action: data.action || '',
+      Summary: data.summary || '',
+      ThreadId: data.threadId || '',
+      AutoReplied: data.autoReplied || false,
+      JeffReviewed: false,
+      Date: new Date().toISOString(),
+    });
+    return { id: record.id, ...record.fields };
+  } catch (err) {
+    console.error('[airtable] logNegotiation failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Update a negotiation record (e.g. Jeff's feedback)
+ */
+async function updateNegotiation(recordId, updates) {
+  const base = getBase();
+  await base('Negotiations').update(recordId, updates);
+}
+
+/**
+ * Log an A/B test variant and its performance
+ */
+async function logABTest(data) {
+  const base = getBase();
+  try {
+    const record = await base('AB Tests').create({
+      TestName: data.testName,
+      Variant: data.variant, // 'A' or 'B'
+      Client: data.client || '',
+      Metric: data.metric, // 'open_rate', 'reply_rate', 'negotiation_success'
+      Subject: data.subject || '',
+      BodyPreview: data.bodyPreview || '',
+      SampleSize: data.sampleSize || 0,
+      Result: data.result || 0,
+      StartDate: data.startDate || new Date().toISOString().split('T')[0],
+      Status: data.status || 'running',
+    });
+    return { id: record.id, ...record.fields };
+  } catch (err) {
+    console.error('[airtable] logABTest failed:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Get running A/B tests
+ */
+async function getABTests(status = 'running') {
+  const base = getBase();
+  try {
+    const records = await base('AB Tests').select({
+      filterByFormula: `{Status} = "${status}"`,
+    }).all();
+    return records.map(r => ({ id: r.id, ...r.fields }));
+  } catch {
+    return [];
+  }
+}
+
 module.exports = {
   getBase,
   getClients,
@@ -229,4 +337,12 @@ module.exports = {
   getRules,
   addRule,
   deleteRule,
+  // Negotiations
+  getOutreachByDomain,
+  getNegotiationHistory,
+  logNegotiation,
+  updateNegotiation,
+  // A/B Testing
+  logABTest,
+  getABTests,
 };
