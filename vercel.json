@@ -17,13 +17,16 @@
     { "src": "/api/cron/prospect-replenish", "dest": "/api/cron/prospect-replenish.js" },
     { "src": "/api/cron/weekly-digest", "dest": "/api/cron/weekly-digest.js" },
     { "src": "/api/cron/bounce-cleanup", "dest": "/api/cron/bounce-cleanup.js" },
-    { "src": "/api/cron/self-improve", "dest": "/api/cron/self-improve.js" }
+    { "src": "/api/cron/self-improve", "dest": "/api/cron/self-improve.js" },
+    { "src": "/api/cron/manager", "dest": "/api/cron/manager.js" }
   ],
   "crons": [
     { "path": "/api/cron/digest", "schedule": "0 7 * * 1-5" },
     { "path": "/api/cron/gmail-poll", "schedule": "*/2 * * * *" },
     { "path": "/api/cron/sender-health", "schedule": "0 6 * * *" },
     { "path": "/api/cron/bounce-cleanup", "schedule": "0 7 * * *" },
+    { "path": "/api/cron/manager", "schedule": "0 8 * * *" },
+    { "path": "/api/cron/manager", "schedule": "0 14 * * *" },
     { "path": "/api/cron/prospect-replenish", "schedule": "0 4 * * 1" },
     { "path": "/api/cron/weekly-digest", "schedule": "0 6 * * 5" },
     { "path": "/api/cron/self-improve", "schedule": "0 20 * * 0" }
