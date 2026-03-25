@@ -69,7 +69,7 @@ async function pullEvents() {
 
   const [hardBounces, complaints, unsubscribes] = await Promise.all([
     fetchAllEvents('hardBounces', startDate, endDate),
-    fetchAllEvents('complaints', startDate, endDate),
+    fetchAllEvents('spam', startDate, endDate),
     fetchAllEvents('unsubscribed', startDate, endDate),
   ]);
 

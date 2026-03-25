@@ -128,9 +128,13 @@ async function getRecentCampaigns(startDate, endDate) {
   const limit = 50;
   let hasMore = true;
 
+  // Brevo requires full ISO datetime format for campaign date filters
+  const startISO = startDate.includes('T') ? startDate : `${startDate}T00:00:00.000Z`;
+  const endISO = endDate.includes('T') ? endDate : `${endDate}T23:59:59.999Z`;
+
   while (hasMore) {
     const data = await brevoFetch(
-      `/emailCampaigns?status=sent&limit=${limit}&offset=${offset}&startDate=${startDate}&endDate=${endDate}`
+      `/emailCampaigns?status=sent&limit=${limit}&offset=${offset}&startDate=${startISO}&endDate=${endISO}`
     );
     const batch = data.campaigns || [];
     campaigns.push(...batch);
