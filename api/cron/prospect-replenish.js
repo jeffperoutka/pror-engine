@@ -266,7 +266,8 @@ async function importContacts(listId, contacts) {
 async function createEmailCampaign(name, sender, listId, subject, htmlBody, scheduledAt) {
   return brevoFetch('/emailCampaigns', 'POST', {
     name,
-    sender: { name: sender.name, email: sender.email, id: sender.id },
+    sender: { name: sender.name, id: sender.id },
+    replyTo: sender.email,
     recipients: { listIds: [listId] },
     subject,
     htmlContent: `<html><body><p style="font-family:Arial,sans-serif;font-size:14px;line-height:1.5">${htmlBody.replace(/\n/g, '<br>')}</p><p style="font-size:11px;color:#999;margin-top:30px;">If you'd prefer not to hear from us, <a href="{{ unsubscribe }}" style="color:#999;text-decoration:underline;">unsubscribe here</a>.</p></body></html>`,
