@@ -510,6 +510,13 @@ async function processInbox() {
         continue;
       }
 
+      // OTHER (internal emails, invoices, billing): not link-building related, skip silently
+      if (c.type === 'other') {
+        await gmail.markAsRead(id).catch(() => {});
+        results.push({ id, from: email.from, type: 'other', action: 'skipped' });
+        continue;
+      }
+
       // ── FEATURE A: Cancel remaining drip campaigns on ANY reply ──
       let cancelledDrips = 0;
       if (senderDomain && (c.type === 'reply_to_outreach' || c.type === 'link_exchange' || c.type === 'inbound_pitch')) {
@@ -691,8 +698,8 @@ async function replayInbox(hours = 24) {
       const round = negotiationHistory.length + 1;
       const c = await classifyEmail(email, negotiationHistory, outreachRecord);
 
-      // Skip auto-replies and spam in replay
-      if (c.type === 'auto_reply' || c.type === 'spam') {
+      // Skip non-link-building types in replay
+      if (c.type === 'auto_reply' || c.type === 'spam' || c.type === 'other') {
         results.push({ id, type: c.type, skipped: true });
         continue;
       }
