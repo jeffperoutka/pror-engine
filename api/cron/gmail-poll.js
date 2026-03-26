@@ -639,10 +639,10 @@ async function replayInbox(hours = 24) {
   const userEmail = process.env.GMAIL_USER_EMAIL || 'daniel@aeolabs.ai';
   const query = `in:inbox after:${afterDate} -from:${userEmail}`;
 
-  console.error(`[gmail-poll] REPLAY: searching "${query}"`);
+  console.error(`[R] q=${query.slice(0, 50)}`);
   const msgList = await gmail.listMessages(query, 50);
 
-  console.error(`[gmail-poll] REPLAY: found ${msgList.length} messages from last ${hours}h`);
+  console.error(`[R] found=${msgList.length} hrs=${hours}`);
 
   if (msgList.length === 0) {
     // Post diagnostic to Slack
@@ -731,7 +731,8 @@ module.exports = async (req, res) => {
 
   const processingPromise = (replay ? replayInbox(replayHours) : processInbox())
     .then(result => {
-      console.error(`[gmail-poll] Done: ${result.processed} processed${replay ? ' (replay)' : ''}`);
+      const tag = replay ? 'R' : 'P';
+      console.error(`[${tag}] done=${result.processed} ${result.error || ''}`);
     })
     .catch(err => {
       console.error('[gmail-poll] Fatal:', err);
