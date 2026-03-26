@@ -358,15 +358,21 @@ function buildSlackBlocks(email, c, opts = {}) {
     });
 
     // Data needed to send the reply (stored in button value, max 2000 chars)
-    const replyData = JSON.stringify({
+    const replyPayload = {
       messageId: email.messageId,
       threadId: email.threadId,
       replyTo: extractReplyAddress(email.from),
-      subject: email.subject,
+      subject: (email.subject || '').slice(0, 150),
       draft: c.draft_reply,
       domain,
       round,
-    });
+    };
+    // Truncate draft if payload would exceed Slack's 2000 char button value limit
+    let replyData = JSON.stringify(replyPayload);
+    if (replyData.length > 1990) {
+      replyPayload.draft = c.draft_reply.slice(0, c.draft_reply.length - (replyData.length - 1900));
+      replyData = JSON.stringify(replyPayload);
+    }
 
     blocks.push({
       type: 'actions',
@@ -490,7 +496,7 @@ async function processInbox() {
         }
         await gmail.archiveMessage(id);
         await slack.post(linksChannel, `:wastebasket: *SPAM auto-archived:* ${escapeSlackMrkdwn(email.from)} — _${escapeSlackMrkdwn(c.summary)}_`).catch((e) => {
-          console.error(`[gmail-poll] Slack spam notification failed:`, e.message);
+          console.error(`[SPAM] SlackErr=${e.data?.error || e.message?.slice(0, 40)}`);
         });
         results.push({ id, from: email.from, type: 'spam', action: 'archived_blacklisted' });
         await gmail.markAsRead(id).catch(() => {});
@@ -540,7 +546,7 @@ async function processInbox() {
           domain: senderDomain || '',
         });
         await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
-          console.error(`[gmail-poll] Slack link_exchange notification failed:`, e.message);
+          console.error(`[LEXCH] SlackErr=${e.data?.error || e.message?.slice(0, 40)}`);
         });
         await gmail.markAsRead(id).catch(() => {});
         results.push({ id, from: email.from, type: 'link_exchange', action: 'pending_approval' });
@@ -597,7 +603,7 @@ async function processInbox() {
         domain: senderDomain || '',
       });
       await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
-        console.error(`[gmail-poll] Slack notification failed for ${id}:`, e.message);
+        console.error(`[POST] SlackErr=${e.data?.error || e.message?.slice(0, 40)}`);
       });
 
       await gmail.markAsRead(id).catch(() => {});
@@ -690,7 +696,9 @@ async function replayInbox(hours = 24) {
         domain: senderDomain || '',
       });
       await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
-        console.error(`[gmail-poll] REPLAY Slack failed for ${id}:`, e.message);
+        // Compact log — Vercel truncates to ~30 chars
+        const errCode = e.data?.error || e.code || e.message?.slice(0, 40);
+        console.error(`[REPLAY] SlackErr=${errCode}`);
       });
 
       results.push({ id, from: email.from, type: c.type, action: 'replayed' });
