@@ -421,19 +421,12 @@ async function processInbox() {
     }
   }
 
-  // Filter out already-processed messages (labeled PROR_PROCESSED)
-  const filteredMessages = [];
-  for (const m of messages) {
-    const alreadyDone = await gmail.hasLabel(m.id, 'PROR_PROCESSED').catch(() => false);
-    if (!alreadyDone) filteredMessages.push(m);
-  }
-
-  if (filteredMessages.length === 0) {
+  // Gmail queries already exclude -label:PROR_PROCESSED, so no per-message check needed
+  if (messages.length === 0) {
     return { processed: 0, message: 'No new messages' };
   }
 
-  // Replace messages reference for the rest of processing
-  const messagesToProcess = filteredMessages;
+  const messagesToProcess = messages;
 
   const results = [];
 

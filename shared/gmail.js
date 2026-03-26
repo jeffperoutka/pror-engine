@@ -189,8 +189,8 @@ async function archiveMessage(messageId) {
  * @returns {Array<object>} Full message objects
  */
 async function getUnreadOutreachReplies(maxResults = 25) {
-  // Fetch unread inbox messages — we filter further after classification
-  const messages = await listMessages('is:unread in:inbox', maxResults);
+  // Fetch unread inbox messages, excluding already-processed ones
+  const messages = await listMessages('is:unread in:inbox -label:PROR_PROCESSED', maxResults);
   return messages;
 }
 
@@ -206,8 +206,8 @@ async function getRecentInboxMessages(minutesBack = 10, maxResults = 50) {
   const since = new Date(Date.now() - minutesBack * 60 * 1000);
   const afterDate = `${since.getFullYear()}/${String(since.getMonth() + 1).padStart(2, '0')}/${String(since.getDate()).padStart(2, '0')}`;
   const userEmail = USER_EMAIL();
-  // Get inbox messages from recent time window, excluding our own sends
-  const messages = await listMessages(`in:inbox after:${afterDate} -from:${userEmail}`, maxResults);
+  // Get inbox messages from recent time window, excluding our own sends and already-processed
+  const messages = await listMessages(`in:inbox after:${afterDate} -from:${userEmail} -label:PROR_PROCESSED`, maxResults);
   return messages;
 }
 
