@@ -92,6 +92,17 @@ async function addToSpamBlacklist(domain, reason = '') {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// Internal/team domains — never post to #link-building
+const INTERNAL_DOMAINS = new Set([
+  'aeolabs.ai',
+  'pror.co',
+  'americangunowners.com', // client team, not link prospects
+]);
+
+function isInternalDomain(domain) {
+  return domain && INTERNAL_DOMAINS.has(domain.toLowerCase());
+}
+
 function extractDomain(emailAddr) {
   const match = emailAddr.match(/@([\w.-]+)/);
   return match ? match[1].toLowerCase() : null;
@@ -299,7 +310,7 @@ function escapeSlackMrkdwn(text) {
 }
 
 function buildSlackBlocks(email, c, opts = {}) {
-  const { round = 1, dr = 0, maxPrice = 0, cancelledDrips = 0, domain = '' } = opts;
+  const { round = 1, dr = 0, maxPrice = 0, cancelledDrips = 0, domain = '', negotiationHistory = [] } = opts;
 
   const typeEmoji = {
     reply_to_outreach: ':leftwards_arrow_with_hook:',
@@ -318,7 +329,7 @@ function buildSlackBlocks(email, c, opts = {}) {
   // Header
   blocks.push({
     type: 'section',
-    text: { type: 'mrkdwn', text: `${typeEmoji} *${c.type.replace(/_/g, ' ').toUpperCase()}* ${sentimentEmoji} — Round ${round}` },
+    text: { type: 'mrkdwn', text: `${typeEmoji} *${c.type.replace(/_/g, ' ').toUpperCase()}* ${sentimentEmoji} — Round ${round} | *${escapeSlackMrkdwn(domain)}*` },
   });
 
   // Details
@@ -329,18 +340,40 @@ function buildSlackBlocks(email, c, opts = {}) {
   const details = [
     `*From:* ${safeFrom}`,
     `*Subject:* ${safeSubject}`,
-    `*Summary:* ${safeSummary}`,
   ];
   if (dr) details.push(`*DR:* ${dr} (${getDRTier(dr)}) | *Max:* $${maxPrice}`);
-  if (c.price_mentioned) details.push(`*Their price:* $${c.price_mentioned}`);
-  if (c.our_counter_offer) details.push(`*Our counter:* $${c.our_counter_offer}`);
-  if (c.wants_link_exchange) details.push(`:arrows_counterclockwise: *Link exchange* — we're open`);
   if (cancelledDrips > 0) details.push(`:octagonal_sign: Cancelled ${cancelledDrips} drip emails`);
-  if (c.price_confirmed) details.push(`:moneybag: *PRICE CONFIRMED*`);
 
   blocks.push({
     type: 'section',
     text: { type: 'mrkdwn', text: details.join('\n') },
+  });
+
+  // ── CONVERSATION HISTORY (show the full negotiation arc) ──
+  if (negotiationHistory.length > 0) {
+    const historyLines = negotiationHistory.slice(-5).map(h => {
+      const dir = h.Direction === 'outbound' ? ':arrow_right:' : ':arrow_left:';
+      const price = h.TheirPrice ? `$${h.TheirPrice}` : '';
+      const offer = h.OurOffer ? `→ us: $${h.OurOffer}` : '';
+      const summary = escapeSlackMrkdwn(h.Summary || '');
+      return `${dir} R${h.Round || '?'}: ${price} ${offer} ${summary}`.trim();
+    });
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `:scroll: *Conversation so far:*\n${historyLines.join('\n')}` },
+    });
+  }
+
+  // ── LATEST MESSAGE SUMMARY ──
+  const latestLines = [`*Latest:* ${safeSummary}`];
+  if (c.price_mentioned) latestLines.push(`*Their price:* $${c.price_mentioned}`);
+  if (c.our_counter_offer) latestLines.push(`*Our counter:* $${c.our_counter_offer}`);
+  if (c.wants_link_exchange) latestLines.push(`:arrows_counterclockwise: *Link exchange* — we're open`);
+  if (c.price_confirmed) latestLines.push(`:moneybag: *PRICE CONFIRMED*`);
+
+  blocks.push({
+    type: 'section',
+    text: { type: 'mrkdwn', text: latestLines.join('\n') },
   });
 
   // Gmail link
@@ -445,6 +478,14 @@ async function processInbox() {
     try {
       const email = await gmail.getMessage(id);
       const senderDomain = extractDomain(email.from);
+
+      // ── Internal/team domain → skip silently ──
+      if (isInternalDomain(senderDomain)) {
+        await gmail.addLabel(id, 'PROR_PROCESSED').catch(() => {});
+        await gmail.markAsRead(id).catch(() => {});
+        results.push({ id, from: email.from, type: 'internal', action: 'skipped' });
+        continue;
+      }
 
       // ── Blacklisted domain → archive silently ──
       if (senderDomain && spamDomains.has(senderDomain)) {
@@ -551,6 +592,7 @@ async function processInbox() {
           maxPrice: getMaxPrice(dr),
           cancelledDrips,
           domain: senderDomain || '',
+          negotiationHistory,
         });
         await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
           console.error(`[LEXCH] SlackErr=${e.data?.error || e.message?.slice(0, 40)}`);
@@ -608,6 +650,7 @@ async function processInbox() {
         maxPrice,
         cancelledDrips,
         domain: senderDomain || '',
+        negotiationHistory,
       });
       await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
         console.error(`[POST] SlackErr=${e.data?.error || e.message?.slice(0, 40)}`);
@@ -677,6 +720,12 @@ async function replayInbox(hours = 24) {
       const email = await gmail.getMessage(id);
       const senderDomain = extractDomain(email.from);
 
+      // Skip internal/team domains
+      if (isInternalDomain(senderDomain)) {
+        results.push({ id, type: 'internal', skipped: true });
+        continue;
+      }
+
       // Skip spam domains silently
       if (senderDomain && spamDomains.has(senderDomain)) {
         results.push({ id, type: 'spam_blacklisted', skipped: true });
@@ -713,6 +762,7 @@ async function replayInbox(hours = 24) {
         maxPrice,
         cancelledDrips: 0,
         domain: senderDomain || '',
+        negotiationHistory,
       });
       await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
         // Compact log — Vercel truncates to ~30 chars
