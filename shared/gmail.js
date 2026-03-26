@@ -195,6 +195,58 @@ async function getUnreadOutreachReplies(maxResults = 25) {
 }
 
 /**
+ * Get recent inbox messages (regardless of read status) from the last N minutes.
+ * Excludes messages sent by us (from: daniel@aeolabs.ai).
+ * Used as fallback when emails are read before gmail-poll gets to them.
+ * @param {number} minutesBack - How many minutes back to look
+ * @param {number} maxResults
+ * @returns {Array<{id: string, threadId: string}>}
+ */
+async function getRecentInboxMessages(minutesBack = 10, maxResults = 50) {
+  const since = new Date(Date.now() - minutesBack * 60 * 1000);
+  const afterDate = `${since.getFullYear()}/${String(since.getMonth() + 1).padStart(2, '0')}/${String(since.getDate()).padStart(2, '0')}`;
+  const userEmail = USER_EMAIL();
+  // Get inbox messages from recent time window, excluding our own sends
+  const messages = await listMessages(`in:inbox after:${afterDate} -from:${userEmail}`, maxResults);
+  return messages;
+}
+
+/**
+ * Add a label to a message (create label if needed)
+ */
+async function addLabel(messageId, labelName) {
+  const token = await getAccessToken();
+  // Get or create the label
+  const labelsRes = await gmailFetch(token, '/labels');
+  let label = (labelsRes.labels || []).find(l => l.name === labelName);
+  if (!label) {
+    label = await gmailFetch(token, '/labels', {
+      method: 'POST',
+      body: JSON.stringify({ name: labelName, labelListVisibility: 'labelHide', messageListVisibility: 'hide' }),
+    });
+  }
+  if (label?.id) {
+    await gmailFetch(token, `/messages/${messageId}/modify`, {
+      method: 'POST',
+      body: JSON.stringify({ addLabelIds: [label.id] }),
+    });
+  }
+  return label?.id;
+}
+
+/**
+ * Check if a message has a specific label
+ */
+async function hasLabel(messageId, labelName) {
+  const token = await getAccessToken();
+  const labelsRes = await gmailFetch(token, '/labels');
+  const label = (labelsRes.labels || []).find(l => l.name === labelName);
+  if (!label) return false;
+  const msg = await gmailFetch(token, `/messages/${messageId}?format=minimal`);
+  return (msg.labelIds || []).includes(label.id);
+}
+
+/**
  * Get count of unread messages (for digest)
  */
 async function getUnreadCount() {
@@ -231,6 +283,9 @@ module.exports = {
   markAsRead,
   archiveMessage,
   getUnreadOutreachReplies,
+  getRecentInboxMessages,
+  addLabel,
+  hasLabel,
   getUnreadCount,
   getSentToday,
   getRecentMessages,

@@ -403,19 +403,41 @@ async function processInbox() {
     return { processed: 0, error: 'No Slack channel configured' };
   }
 
-  // Load spam blacklist and unread messages in parallel
-  const [spamDomains, messages] = await Promise.all([
+  // Load spam blacklist and messages in parallel
+  // Try unread first, then fall back to recent messages (catches emails read by team)
+  const [spamDomains, unreadMessages, recentMessages] = await Promise.all([
     getSpamDomains(),
-    gmail.getUnreadOutreachReplies(50), // Increased from 25 for scale
+    gmail.getUnreadOutreachReplies(50),
+    gmail.getRecentInboxMessages(15, 50), // Last 15 minutes
   ]);
 
-  if (messages.length === 0) {
-    return { processed: 0, message: 'No unread messages' };
+  // Merge: unread + recent, deduplicate by ID
+  const seenIds = new Set();
+  const messages = [];
+  for (const m of [...unreadMessages, ...recentMessages]) {
+    if (!seenIds.has(m.id)) {
+      seenIds.add(m.id);
+      messages.push(m);
+    }
   }
+
+  // Filter out already-processed messages (labeled PROR_PROCESSED)
+  const filteredMessages = [];
+  for (const m of messages) {
+    const alreadyDone = await gmail.hasLabel(m.id, 'PROR_PROCESSED').catch(() => false);
+    if (!alreadyDone) filteredMessages.push(m);
+  }
+
+  if (filteredMessages.length === 0) {
+    return { processed: 0, message: 'No new messages' };
+  }
+
+  // Replace messages reference for the rest of processing
+  const messagesToProcess = filteredMessages;
 
   const results = [];
 
-  for (const { id } of messages) {
+  for (const { id } of messagesToProcess) {
     try {
       const email = await gmail.getMessage(id);
       const senderDomain = extractDomain(email.from);
@@ -424,6 +446,7 @@ async function processInbox() {
       if (senderDomain && spamDomains.has(senderDomain)) {
         await gmail.archiveMessage(id);
         results.push({ id, from: email.from, type: 'spam_blacklisted', action: 'archived' });
+        await gmail.addLabel(id, 'PROR_PROCESSED').catch(() => {});
         continue;
       }
 
@@ -460,12 +483,14 @@ async function processInbox() {
         await slack.post(linksChannel, `:wastebasket: *SPAM auto-archived:* ${email.from} — _${c.summary}_`);
         results.push({ id, from: email.from, type: 'spam', action: 'archived_blacklisted' });
         await gmail.markAsRead(id);
+        await gmail.addLabel(id, 'PROR_PROCESSED').catch(() => {});
         continue;
       }
 
       // AUTO-REPLY (OOO, bounces): mark read, skip
       if (c.type === 'auto_reply') {
         await gmail.markAsRead(id);
+        await gmail.addLabel(id, 'PROR_PROCESSED').catch(() => {});
         results.push({ id, from: email.from, type: 'auto_reply', action: 'marked_read' });
         continue;
       }
@@ -521,6 +546,7 @@ async function processInbox() {
         });
         await slack.postBlocks(linksChannel, blocks, fallbackText);
         await gmail.markAsRead(id);
+        await gmail.addLabel(id, 'PROR_PROCESSED').catch(() => {});
         results.push({ id, from: email.from, type: 'link_exchange', action: replied ? 'auto_replied' : 'flagged', replied });
         continue;
       }
@@ -606,6 +632,8 @@ async function processInbox() {
         round,
         cancelledDrips,
       });
+      // Mark as processed so we don't handle it again
+      await gmail.addLabel(id, 'PROR_PROCESSED').catch(() => {});
     } catch (err) {
       console.error(`[gmail-poll] Error on message ${id}:`, err.message);
       results.push({ id, error: err.message });
