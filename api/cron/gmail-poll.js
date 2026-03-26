@@ -470,6 +470,12 @@ async function processInbox() {
 
       console.error(`[gmail-poll] id=${id} from=${email.from.slice(0, 40)} type=${c.type} round=${round} action=${c.suggested_action} autoReply=${c.should_auto_reply}`);
 
+      // ── IMMEDIATELY label as processed to prevent reprocessing loops ──
+      // Even if Slack/Airtable/Brevo fail below, we don't want to re-classify every 2 min
+      await gmail.addLabel(id, 'PROR_PROCESSED').catch((e) => {
+        console.error(`[gmail-poll] CRITICAL: Failed to label ${id} as processed:`, e.message);
+      });
+
       // ── Handle by classification type ──
 
       // SPAM: auto-archive + blacklist domain
@@ -478,17 +484,17 @@ async function processInbox() {
           await addToSpamBlacklist(senderDomain, c.summary);
         }
         await gmail.archiveMessage(id);
-        await slack.post(linksChannel, `:wastebasket: *SPAM auto-archived:* ${email.from} — _${c.summary}_`);
+        await slack.post(linksChannel, `:wastebasket: *SPAM auto-archived:* ${email.from} — _${c.summary}_`).catch((e) => {
+          console.error(`[gmail-poll] Slack spam notification failed:`, e.message);
+        });
         results.push({ id, from: email.from, type: 'spam', action: 'archived_blacklisted' });
-        await gmail.markAsRead(id);
-        await gmail.addLabel(id, 'PROR_PROCESSED').catch(() => {});
+        await gmail.markAsRead(id).catch(() => {});
         continue;
       }
 
       // AUTO-REPLY (OOO, bounces): mark read, skip
       if (c.type === 'auto_reply') {
-        await gmail.markAsRead(id);
-        await gmail.addLabel(id, 'PROR_PROCESSED').catch(() => {});
+        await gmail.markAsRead(id).catch(() => {});
         results.push({ id, from: email.from, type: 'auto_reply', action: 'marked_read' });
         continue;
       }
@@ -542,9 +548,10 @@ async function processInbox() {
           cancelledDrips,
           domain: senderDomain || '',
         });
-        await slack.postBlocks(linksChannel, blocks, fallbackText);
-        await gmail.markAsRead(id);
-        await gmail.addLabel(id, 'PROR_PROCESSED').catch(() => {});
+        await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
+          console.error(`[gmail-poll] Slack link_exchange notification failed:`, e.message);
+        });
+        await gmail.markAsRead(id).catch(() => {});
         results.push({ id, from: email.from, type: 'link_exchange', action: replied ? 'auto_replied' : 'flagged', replied });
         continue;
       }
@@ -615,10 +622,12 @@ async function processInbox() {
           cancelledDrips,
           domain: senderDomain || '',
         });
-        await slack.postBlocks(linksChannel, blocks, fallbackText);
+        await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
+          console.error(`[gmail-poll] Slack notification failed for ${id}:`, e.message);
+        });
       }
 
-      await gmail.markAsRead(id);
+      await gmail.markAsRead(id).catch(() => {});
 
       results.push({
         id,
@@ -630,10 +639,8 @@ async function processInbox() {
         round,
         cancelledDrips,
       });
-      // Mark as processed so we don't handle it again
-      await gmail.addLabel(id, 'PROR_PROCESSED').catch(() => {});
     } catch (err) {
-      console.error(`[gmail-poll] Error on message ${id}:`, err.message);
+      console.error(`[gmail-poll] Error on message ${id}: ${err.message} | Stack: ${(err.stack || '').split('\n').slice(0, 3).join(' -> ')}`);
       results.push({ id, error: err.message });
     }
   }
