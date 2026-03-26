@@ -447,10 +447,15 @@ async function processInbox() {
       let negotiationHistory = [];
       let outreachRecord = null;
       if (senderDomain) {
-        [negotiationHistory, outreachRecord] = await Promise.all([
-          airtable.getNegotiationHistory(senderDomain),
-          airtable.getOutreachByDomain(senderDomain),
-        ]);
+        try {
+          [negotiationHistory, outreachRecord] = await Promise.all([
+            airtable.getNegotiationHistory(senderDomain),
+            airtable.getOutreachByDomain(senderDomain).catch(() => null),
+          ]);
+        } catch (err) {
+          console.error(`[gmail-poll] Airtable context load failed for ${senderDomain}:`, err.message);
+          // Continue without context — classification still works
+        }
       }
 
       const round = negotiationHistory.length + 1;
