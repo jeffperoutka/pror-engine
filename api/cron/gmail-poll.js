@@ -364,17 +364,27 @@ function buildSlackBlocks(email, c, opts = {}) {
     });
   }
 
-  // ── LATEST MESSAGE SUMMARY ──
-  const latestLines = [`*Latest:* ${safeSummary}`];
-  if (c.price_mentioned) latestLines.push(`*Their price:* $${c.price_mentioned}`);
-  if (c.our_counter_offer) latestLines.push(`*Our counter:* $${c.our_counter_offer}`);
-  if (c.wants_link_exchange) latestLines.push(`:arrows_counterclockwise: *Link exchange* — we're open`);
-  if (c.price_confirmed) latestLines.push(`:moneybag: *PRICE CONFIRMED*`);
+  // ── THEIR ACTUAL MESSAGE ──
+  const bodyText = escapeSlackMrkdwn((email.body || email.snippet || '').slice(0, 800).trim());
+  if (bodyText) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `:speech_balloon: *Their message:*\n>>> ${bodyText}` },
+    });
+  }
 
-  blocks.push({
-    type: 'section',
-    text: { type: 'mrkdwn', text: latestLines.join('\n') },
-  });
+  // ── PRICING / STATUS ──
+  const statusLines = [];
+  if (c.price_mentioned) statusLines.push(`*Their price:* $${c.price_mentioned}`);
+  if (c.our_counter_offer) statusLines.push(`*Our counter:* $${c.our_counter_offer}`);
+  if (c.wants_link_exchange) statusLines.push(`:arrows_counterclockwise: *Link exchange* — we're open`);
+  if (c.price_confirmed) statusLines.push(`:moneybag: *PRICE CONFIRMED*`);
+  if (statusLines.length > 0) {
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: statusLines.join('\n') },
+    });
+  }
 
   // Gmail link
   blocks.push({
