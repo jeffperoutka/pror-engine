@@ -299,7 +299,7 @@ function escapeSlackMrkdwn(text) {
 }
 
 function buildSlackBlocks(email, c, opts = {}) {
-  const { replied = false, round = 1, dr = 0, maxPrice = 0, cancelledDrips = 0, domain = '' } = opts;
+  const { round = 1, dr = 0, maxPrice = 0, cancelledDrips = 0, domain = '' } = opts;
 
   const typeEmoji = {
     reply_to_outreach: ':leftwards_arrow_with_hook:',
@@ -343,57 +343,53 @@ function buildSlackBlocks(email, c, opts = {}) {
     text: { type: 'mrkdwn', text: details.join('\n') },
   });
 
-  // Auto-reply preview (if sent)
-  if (replied && c.draft_reply) {
-    blocks.push({
-      type: 'section',
-      text: { type: 'mrkdwn', text: `:white_check_mark: *Auto-replied:*\n> _${escapeSlackMrkdwn(c.draft_reply.slice(0, 200))}_` },
-    });
-  }
-
   // Gmail link
   blocks.push({
     type: 'section',
     text: { type: 'mrkdwn', text: `<${gmailUrl}|:envelope: Open in Gmail>` },
   });
 
-  // ── FEEDBACK BUTTONS (zero friction) ──
-  if (replied) {
+  // ── PROPOSED REPLY (needs Jeff's approval before sending) ──
+  if (c.should_auto_reply && c.draft_reply) {
     blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'section',
+      text: { type: 'mrkdwn', text: `:memo: *Proposed reply:*\n> _${escapeSlackMrkdwn(c.draft_reply.slice(0, 300))}_` },
+    });
+
+    // Data needed to send the reply (stored in button value, max 2000 chars)
+    const replyData = JSON.stringify({
+      messageId: email.messageId,
+      threadId: email.threadId,
+      replyTo: extractReplyAddress(email.from),
+      subject: email.subject,
+      draft: c.draft_reply,
+      domain,
+      round,
+    });
+
     blocks.push({
       type: 'actions',
       elements: [
         {
           type: 'button',
-          text: { type: 'plain_text', text: ':thumbsup: Good reply' },
+          text: { type: 'plain_text', text: 'Send Reply' },
           style: 'primary',
-          action_id: `feedback_good_${domain}`,
-          value: JSON.stringify({ domain, round, action: 'good' }),
+          action_id: `send_reply_${domain}`,
+          value: replyData,
         },
         {
           type: 'button',
-          text: { type: 'plain_text', text: ':thumbsdown: Bad reply' },
+          text: { type: 'plain_text', text: 'Reject' },
           style: 'danger',
-          action_id: `feedback_bad_${domain}`,
-          value: JSON.stringify({ domain, round, action: 'bad' }),
-        },
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: ':money_with_wings: Too high' },
-          action_id: `feedback_toohigh_${domain}`,
-          value: JSON.stringify({ domain, round, action: 'too_high' }),
-        },
-        {
-          type: 'button',
-          text: { type: 'plain_text', text: ':chart_with_downwards_trend: Too low' },
-          action_id: `feedback_toolow_${domain}`,
-          value: JSON.stringify({ domain, round, action: 'too_low' }),
+          action_id: `reject_reply_${domain}`,
+          value: JSON.stringify({ domain, round, action: 'reject' }),
         },
       ],
     });
     blocks.push({
       type: 'context',
-      elements: [{ type: 'mrkdwn', text: '_Tap a button or reply in thread for detailed feedback_' }],
+      elements: [{ type: 'mrkdwn', text: '_Tap Send to reply, Reject to skip. Reply in thread with edits._' }],
     });
   }
 
@@ -515,21 +511,8 @@ async function processInbox() {
         cancelledDrips = cancelResult.cancelled || 0;
       }
 
-      // ── LINK EXCHANGE: We're open to it — auto-reply with interest ──
+      // ── LINK EXCHANGE: We're open to it ──
       if (c.type === 'link_exchange' || c.wants_link_exchange) {
-        let replied = false;
-
-        if (c.should_auto_reply && c.draft_reply && !recentAutoReply) {
-          try {
-            const replyTo = extractReplyAddress(email.from);
-            await gmail.sendReply(email.messageId, email.threadId, replyTo, email.subject, c.draft_reply);
-            replied = true;
-            console.error(`[gmail-poll] Auto-replied to link exchange: ${replyTo}`);
-          } catch (err) {
-            console.error(`[gmail-poll] Link exchange auto-reply failed: ${err.message}`);
-          }
-        }
-
         // Log negotiation
         if (senderDomain) {
           await airtable.logNegotiation({
@@ -544,13 +527,12 @@ async function processInbox() {
             action: 'link_exchange',
             summary: c.summary,
             threadId: email.threadId,
-            autoReplied: replied,
+            autoReplied: false,
           });
         }
 
         const dr = outreachRecord?.DR || 0;
         const { blocks, fallbackText } = buildSlackBlocks(email, c, {
-          replied,
           round,
           dr,
           maxPrice: getMaxPrice(dr),
@@ -561,12 +543,11 @@ async function processInbox() {
           console.error(`[gmail-poll] Slack link_exchange notification failed:`, e.message);
         });
         await gmail.markAsRead(id).catch(() => {});
-        results.push({ id, from: email.from, type: 'link_exchange', action: replied ? 'auto_replied' : 'flagged', replied });
+        results.push({ id, from: email.from, type: 'link_exchange', action: 'pending_approval' });
         continue;
       }
 
       // ── REPLY TO OUTREACH: the money path — negotiation ladder (Feature C) ──
-      let replied = false;
       const dr = outreachRecord?.DR || outreachRecord?.dr || 0;
       const maxPrice = getMaxPrice(dr);
 
@@ -588,19 +569,7 @@ async function processInbox() {
           await updateOutreachRecord(senderDomain, airtableUpdates);
         }
 
-        // Auto-reply with negotiation (unless double-reply guard triggers)
-        if (c.should_auto_reply && c.draft_reply && !recentAutoReply) {
-          try {
-            const replyTo = extractReplyAddress(email.from);
-            await gmail.sendReply(email.messageId, email.threadId, replyTo, email.subject, c.draft_reply);
-            replied = true;
-            console.error(`[gmail-poll] Auto-replied to ${replyTo} (round ${round})`);
-          } catch (err) {
-            console.error(`[gmail-poll] Auto-reply failed for ${id}:`, err.message);
-          }
-        }
-
-        // Log negotiation event (Feature B)
+        // Log negotiation event (Feature B) — no auto-reply, Jeff approves first
         if (senderDomain) {
           await airtable.logNegotiation({
             domain: senderDomain,
@@ -614,27 +583,22 @@ async function processInbox() {
             action: c.suggested_action,
             summary: c.summary,
             threadId: email.threadId,
-            autoReplied: replied,
+            autoReplied: false,
           });
         }
       }
 
-      // ── Post to Slack with interactive buttons (ALL replies for full visibility) ──
-      const shouldNotify = true; // Post everything — Jeff wants to see all opportunities and give feedback
-
-      if (shouldNotify) {
-        const { blocks, fallbackText } = buildSlackBlocks(email, c, {
-          replied,
-          round,
-          dr,
-          maxPrice,
-          cancelledDrips,
-          domain: senderDomain || '',
-        });
-        await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
-          console.error(`[gmail-poll] Slack notification failed for ${id}:`, e.message);
-        });
-      }
+      // ── Post to Slack — Jeff reviews and approves replies before sending ──
+      const { blocks, fallbackText } = buildSlackBlocks(email, c, {
+        round,
+        dr,
+        maxPrice,
+        cancelledDrips,
+        domain: senderDomain || '',
+      });
+      await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
+        console.error(`[gmail-poll] Slack notification failed for ${id}:`, e.message);
+      });
 
       await gmail.markAsRead(id).catch(() => {});
 
@@ -642,9 +606,7 @@ async function processInbox() {
         id,
         from: email.from,
         type: c.type,
-        action: c.suggested_action,
-        replied,
-        notified: shouldNotify,
+        action: 'pending_approval',
         round,
         cancelledDrips,
       });

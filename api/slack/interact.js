@@ -5,6 +5,7 @@
 const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
 const airtable = require('../../shared/airtable');
+const gmail = require('../../shared/gmail');
 
 async function processInteraction(payload) {
   try {
@@ -85,6 +86,15 @@ async function handleAction(action, context) {
       break;
     }
     default: {
+      // ── Send/Reject reply buttons (from gmail-poll) ──
+      if (actionId.startsWith('send_reply_')) {
+        await handleSendReply(action, context);
+        break;
+      }
+      if (actionId.startsWith('reject_reply_')) {
+        await handleRejectReply(action, context);
+        break;
+      }
       // ── Negotiation feedback buttons (from gmail-poll) ──
       if (actionId.startsWith('feedback_')) {
         await handleNegotiationFeedback(action, context);
@@ -135,6 +145,108 @@ async function handleNegotiationFeedback(action, context) {
 
   } catch (err) {
     console.error('[interact] Feedback handler error:', err.message);
+  }
+}
+
+/**
+ * Handle "Send Reply" button — Jeff approved the proposed reply.
+ * Sends the email via Gmail and confirms in Slack thread.
+ */
+async function handleSendReply(action, context) {
+  try {
+    const data = JSON.parse(action.value || '{}');
+    const { messageId, threadId, replyTo, subject, draft, domain, round } = data;
+
+    if (!replyTo || !draft) {
+      await slack.post(context.channel, ':warning: Missing reply data — cannot send.', {
+        thread_ts: context.message_ts,
+      });
+      return;
+    }
+
+    // Check if user replied in thread with edits
+    let replyText = draft;
+    if (context.message_ts) {
+      try {
+        const thread = await slack.getThread(context.channel, context.message_ts);
+        // Look for a user message (not bot) in the thread — that's the edited reply
+        const userEdit = thread.find(m => m.user && !m.bot_id && m.text && m.ts !== context.message_ts);
+        if (userEdit) {
+          replyText = userEdit.text;
+        }
+      } catch {
+        // Can't read thread — use original draft
+      }
+    }
+
+    // Send via Gmail
+    await gmail.sendReply(messageId, threadId, replyTo, subject, replyText);
+
+    // Log to Airtable
+    if (domain) {
+      await airtable.logNegotiation({
+        domain,
+        client: '',
+        round: round || 1,
+        direction: 'outbound',
+        theirPrice: null,
+        ourOffer: null,
+        dr: null,
+        sentiment: 'neutral',
+        action: 'reply_sent',
+        summary: `Jeff-approved reply sent to ${replyTo}`,
+        threadId,
+        autoReplied: false,
+      }).catch(() => {});
+    }
+
+    // Confirm in Slack
+    await slack.react(context.channel, context.message_ts, 'white_check_mark');
+    const editNote = replyText !== draft ? ' (with your edits)' : '';
+    await slack.post(context.channel, `:outbox_tray: Reply sent to *${domain || replyTo}*${editNote}`, {
+      thread_ts: context.message_ts,
+    });
+
+  } catch (err) {
+    console.error('[interact] Send reply error:', err.message);
+    await slack.post(context.channel, `:x: Failed to send reply: ${err.message}`, {
+      thread_ts: context.message_ts,
+    }).catch(() => {});
+  }
+}
+
+/**
+ * Handle "Reject" button — Jeff declined the proposed reply.
+ */
+async function handleRejectReply(action, context) {
+  try {
+    const data = JSON.parse(action.value || '{}');
+    const { domain, round } = data;
+
+    await slack.react(context.channel, context.message_ts, 'x');
+    await slack.post(context.channel, `:no_entry_sign: Reply rejected for *${domain || 'unknown'}*. No email sent.`, {
+      thread_ts: context.message_ts,
+    });
+
+    // Log rejection
+    if (domain) {
+      await airtable.logNegotiation({
+        domain,
+        client: '',
+        round: round || 1,
+        direction: 'outbound',
+        theirPrice: null,
+        ourOffer: null,
+        dr: null,
+        sentiment: 'neutral',
+        action: 'reply_rejected',
+        summary: 'Jeff rejected proposed reply',
+        threadId: null,
+        autoReplied: false,
+      }).catch(() => {});
+    }
+  } catch (err) {
+    console.error('[interact] Reject reply error:', err.message);
   }
 }
 
