@@ -129,8 +129,11 @@ async function getRecentCampaigns(startDate, endDate) {
   let hasMore = true;
 
   // Brevo requires full ISO datetime format for campaign date filters
+  // End date must not exceed current time — Brevo rejects future end dates
   const startISO = startDate.includes('T') ? startDate : `${startDate}T00:00:00.000Z`;
-  const endISO = endDate.includes('T') ? endDate : `${endDate}T23:59:59.999Z`;
+  const nowISO = new Date().toISOString();
+  const candidateEnd = endDate.includes('T') ? endDate : `${endDate}T23:59:59.999Z`;
+  const endISO = candidateEnd > nowISO ? nowISO : candidateEnd;
 
   while (hasMore) {
     const data = await brevoFetch(
