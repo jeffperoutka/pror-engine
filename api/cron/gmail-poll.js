@@ -619,6 +619,91 @@ async function processInbox() {
   return { processed: results.length, results };
 }
 
+// ── Replay Mode: Re-process past emails and post to Slack ────────────────────
+
+async function replayInbox(hours = 24) {
+  const linksChannel = process.env.CHANNEL_LINK_BUILDING;
+  if (!linksChannel) {
+    return { processed: 0, error: 'No Slack channel configured' };
+  }
+
+  // Search for ALL inbox messages from the past N hours (including PROR_PROCESSED)
+  const since = new Date(Date.now() - hours * 60 * 60 * 1000);
+  const afterDate = `${since.getFullYear()}/${String(since.getMonth() + 1).padStart(2, '0')}/${String(since.getDate()).padStart(2, '0')}`;
+  const userEmail = process.env.GMAIL_USER_EMAIL || 'daniel@aeolabs.ai';
+  const query = `in:inbox after:${afterDate} -from:${userEmail}`;
+
+  console.error(`[gmail-poll] REPLAY: searching "${query}"`);
+  const msgList = await gmail.listMessages(query, 50);
+
+  console.error(`[gmail-poll] REPLAY: found ${msgList.length} messages from last ${hours}h`);
+
+  if (msgList.length === 0) {
+    // Post diagnostic to Slack
+    await slack.post(linksChannel, `:mag: *Replay: 0 messages found* in last ${hours}h.\nQuery: \`${query}\`\nThis could mean no replies came in, or there's a forwarding issue.`).catch(() => {});
+    return { processed: 0, message: 'No messages found in replay window' };
+  }
+
+  const [spamDomains] = await Promise.all([getSpamDomains()]);
+  const results = [];
+
+  for (const { id } of msgList) {
+    try {
+      const email = await gmail.getMessage(id);
+      const senderDomain = extractDomain(email.from);
+
+      // Skip spam domains silently
+      if (senderDomain && spamDomains.has(senderDomain)) {
+        results.push({ id, type: 'spam_blacklisted', skipped: true });
+        continue;
+      }
+
+      // Load context
+      let negotiationHistory = [];
+      let outreachRecord = null;
+      if (senderDomain) {
+        try {
+          [negotiationHistory, outreachRecord] = await Promise.all([
+            airtable.getNegotiationHistory(senderDomain),
+            airtable.getOutreachByDomain(senderDomain).catch(() => null),
+          ]);
+        } catch { /* continue without context */ }
+      }
+
+      const round = negotiationHistory.length + 1;
+      const c = await classifyEmail(email, negotiationHistory, outreachRecord);
+
+      // Skip auto-replies and spam in replay
+      if (c.type === 'auto_reply' || c.type === 'spam') {
+        results.push({ id, type: c.type, skipped: true });
+        continue;
+      }
+
+      // Post to Slack with approval buttons
+      const dr = outreachRecord?.DR || outreachRecord?.dr || 0;
+      const maxPrice = getMaxPrice(dr);
+      const { blocks, fallbackText } = buildSlackBlocks(email, c, {
+        round,
+        dr,
+        maxPrice,
+        cancelledDrips: 0,
+        domain: senderDomain || '',
+      });
+      await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
+        console.error(`[gmail-poll] REPLAY Slack failed for ${id}:`, e.message);
+      });
+
+      results.push({ id, from: email.from, type: c.type, action: 'replayed' });
+    } catch (err) {
+      console.error(`[gmail-poll] REPLAY error on ${id}: ${err.message}`);
+      results.push({ id, error: err.message });
+    }
+  }
+
+  await slack.post(linksChannel, `:arrows_counterclockwise: *Replay complete:* ${results.filter(r => r.action === 'replayed').length} messages posted for review`).catch(() => {});
+  return { processed: results.length, results };
+}
+
 // ── Vercel Cron Handler ──────────────────────────────────────────────────────
 
 module.exports = async (req, res) => {
@@ -632,10 +717,13 @@ module.exports = async (req, res) => {
     return res.status(405).end();
   }
 
-  // Run processing in background so we return fast
-  const processingPromise = processInbox()
+  // ?replay=1 — re-process past N hours (default 24) including already-processed messages
+  const replay = req.query?.replay === '1';
+  const replayHours = parseInt(req.query?.hours || '24', 10);
+
+  const processingPromise = (replay ? replayInbox(replayHours) : processInbox())
     .then(result => {
-      console.error(`[gmail-poll] Done: ${result.processed} processed`);
+      console.error(`[gmail-poll] Done: ${result.processed} processed${replay ? ' (replay)' : ''}`);
     })
     .catch(err => {
       console.error('[gmail-poll] Fatal:', err);
@@ -643,5 +731,5 @@ module.exports = async (req, res) => {
 
   waitUntil(processingPromise);
 
-  res.status(200).json({ ok: true, message: 'Gmail poll triggered' });
+  res.status(200).json({ ok: true, message: replay ? `Replaying last ${replayHours}h` : 'Gmail poll triggered' });
 };
