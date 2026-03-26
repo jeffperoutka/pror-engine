@@ -293,6 +293,11 @@ async function cancelDripsForDomain(domain) {
  * Build Slack Block Kit message with interactive buttons for zero-friction feedback.
  * Jeff just taps a button — no typing needed.
  */
+function escapeSlackMrkdwn(text) {
+  // Slack mrkdwn treats < > & as special chars
+  return (text || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 function buildSlackBlocks(email, c, opts = {}) {
   const { replied = false, round = 1, dr = 0, maxPrice = 0, cancelledDrips = 0, domain = '' } = opts;
 
@@ -317,10 +322,14 @@ function buildSlackBlocks(email, c, opts = {}) {
   });
 
   // Details
+  const safeFrom = escapeSlackMrkdwn(email.from);
+  const safeSubject = escapeSlackMrkdwn(email.subject);
+  const safeSummary = escapeSlackMrkdwn(c.summary);
+
   const details = [
-    `*From:* ${email.from}`,
-    `*Subject:* ${email.subject}`,
-    `*Summary:* ${c.summary}`,
+    `*From:* ${safeFrom}`,
+    `*Subject:* ${safeSubject}`,
+    `*Summary:* ${safeSummary}`,
   ];
   if (dr) details.push(`*DR:* ${dr} (${getDRTier(dr)}) | *Max:* $${maxPrice}`);
   if (c.price_mentioned) details.push(`*Their price:* $${c.price_mentioned}`);
@@ -338,7 +347,7 @@ function buildSlackBlocks(email, c, opts = {}) {
   if (replied && c.draft_reply) {
     blocks.push({
       type: 'section',
-      text: { type: 'mrkdwn', text: `:white_check_mark: *Auto-replied:*\n> _${c.draft_reply.slice(0, 200)}_` },
+      text: { type: 'mrkdwn', text: `:white_check_mark: *Auto-replied:*\n> _${escapeSlackMrkdwn(c.draft_reply.slice(0, 200))}_` },
     });
   }
 
@@ -389,7 +398,7 @@ function buildSlackBlocks(email, c, opts = {}) {
   }
 
   // Fallback text for notifications
-  const fallbackText = `${c.type.replace(/_/g, ' ')} from ${email.from} — ${c.summary}`;
+  const fallbackText = `${c.type.replace(/_/g, ' ')} from ${safeFrom} — ${safeSummary}`;
 
   return { blocks, fallbackText };
 }
@@ -484,7 +493,7 @@ async function processInbox() {
           await addToSpamBlacklist(senderDomain, c.summary);
         }
         await gmail.archiveMessage(id);
-        await slack.post(linksChannel, `:wastebasket: *SPAM auto-archived:* ${email.from} — _${c.summary}_`).catch((e) => {
+        await slack.post(linksChannel, `:wastebasket: *SPAM auto-archived:* ${escapeSlackMrkdwn(email.from)} — _${escapeSlackMrkdwn(c.summary)}_`).catch((e) => {
           console.error(`[gmail-poll] Slack spam notification failed:`, e.message);
         });
         results.push({ id, from: email.from, type: 'spam', action: 'archived_blacklisted' });
