@@ -650,10 +650,22 @@ async function replayInbox(hours = 24) {
     return { processed: 0, message: 'No messages found in replay window' };
   }
 
+  // Deduplicate: only keep the LATEST message per thread (avoid posting 5 msgs for one conversation)
+  const threadLatest = new Map();
+  for (const msg of msgList) {
+    const tid = msg.threadId || msg.id;
+    // msgList is newest-first from Gmail, so first seen per thread = latest
+    if (!threadLatest.has(tid)) {
+      threadLatest.set(tid, msg);
+    }
+  }
+  const dedupedList = [...threadLatest.values()];
+  console.error(`[R] dedup=${msgList.length}->${dedupedList.length}`);
+
   const [spamDomains] = await Promise.all([getSpamDomains()]);
   const results = [];
 
-  for (const { id } of msgList) {
+  for (const { id } of dedupedList) {
     try {
       const email = await gmail.getMessage(id);
       const senderDomain = extractDomain(email.from);
