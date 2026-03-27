@@ -770,8 +770,10 @@ module.exports = async function handler(req, res) {
 
   // Return immediately, process in background
   const promise = runReplenishment()
-    .then(result => {
+    .then(async result => {
       console.log(`Replenishment complete: ${result.totalNewProspects} new prospects, $${result.totalCost.toFixed(2)} cost`);
+      const { logCronRun } = require('../../shared/airtable');
+      await logCronRun('prospect-replenish').catch(() => {});
     })
     .catch(err => {
       console.error('Replenishment failed:', err);

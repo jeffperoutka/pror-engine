@@ -248,39 +248,52 @@ async function checkPipelineIntegrity() {
   console.log('[manager] Checking pipeline integrity...');
   const alerts = [];
 
-  // 2a. Prospect inventory per client
-  const outreachRecords = await airtableSelect('Outreach', {
-    filterByFormula: '{Status} = "unsent"',
-  });
-
-  const inventoryByClient = {};
-  for (const client of CLIENTS) {
-    inventoryByClient[client.slug] = 0;
+  // 2a. Prospect inventory per client — check queued Brevo campaigns per client
+  // The Outreach table doesn't have Status or Client fields, so we count
+  // queued campaigns in Brevo as the source of truth for pipeline health.
+  let queuedCampaigns = [];
+  try {
+    const data = await brevoFetch('/emailCampaigns?status=queued&limit=200&offset=0');
+    queuedCampaigns = data.campaigns || [];
+  } catch (err) {
+    console.error('[manager] Failed to fetch queued campaigns:', err.message);
   }
-  for (const r of outreachRecords) {
-    const clientSlug = r.Client || r.ClientSlug || '';
-    if (inventoryByClient[clientSlug] !== undefined) {
-      inventoryByClient[clientSlug]++;
+
+  const queuedByClient = {};
+  for (const client of CLIENTS) {
+    queuedByClient[client.slug] = 0;
+  }
+  for (const c of queuedCampaigns) {
+    const senderEmail = c.sender?.email || '';
+    const senderDomain = senderEmail.split('@')[1]?.toLowerCase() || '';
+    for (const client of CLIENTS) {
+      if (client.senderDomains.some(d => senderDomain === d || senderDomain.endsWith('.' + d))) {
+        queuedByClient[client.slug]++;
+        break;
+      }
     }
   }
 
   for (const client of CLIENTS) {
-    const count = inventoryByClient[client.slug] || 0;
-    const daysLeft = count / THRESHOLDS.dailySendRate;
-    if (count === 0) {
-      alerts.push({
-        level: 'critical',
-        client: client.name,
-        message: `0 prospects — BLOCKED (no emails can be sent)`,
-        autoFixable: 'replenish',
-      });
-    } else if (daysLeft < THRESHOLDS.prospectMinDays) {
+    const queued = queuedByClient[client.slug] || 0;
+    if (queued === 0) {
       alerts.push({
         level: 'warning',
         client: client.name,
-        message: `${count} prospects left (< ${Math.round(daysLeft * 10) / 10} days at current rate)`,
+        message: `0 queued campaigns — no scheduled emails pending`,
         autoFixable: 'replenish',
       });
+    } else {
+      // Each campaign typically sends ~55 emails, so queued campaigns ≈ days of inventory
+      const approxDays = queued; // ~1 campaign per day per client
+      if (approxDays < THRESHOLDS.prospectMinDays) {
+        alerts.push({
+          level: 'warning',
+          client: client.name,
+          message: `${queued} queued campaigns (< ${THRESHOLDS.prospectMinDays} days of inventory)`,
+          autoFixable: 'replenish',
+        });
+      }
     }
   }
 
@@ -627,40 +640,42 @@ async function executeAutoFixes(pipelineAlerts, anomalies) {
     }
   }
 
-  // 5c. Emergency prospect replenishment for critically low clients
+  // 5c. Emergency prospect replenishment — trigger if ANY client has 0 queued campaigns
   const replenishAlerts = pipelineAlerts.filter(
-    a => a.autoFixable === 'replenish' && a.level === 'critical'
+    a => a.autoFixable === 'replenish' && a.message.includes('0 queued')
   );
-  for (const alert of replenishAlerts) {
-    const client = CLIENTS.find(c => c.name === alert.client);
-    if (client) {
-      // Trigger prospect replenishment by creating a request record
-      await airtableCreate('ManagerActions', {
-        Date: new Date().toISOString(),
-        Action: 'emergency_replenish',
-        Client: client.name,
-        Reason: alert.message,
-        Detail: 'Emergency replenishment triggered — prospect inventory depleted',
-        Automated: true,
-      });
-
-      // Create a replenish request that prospect-replenish can pick up on next run
-      await airtableCreate('SystemHealth', {
-        Type: 'replenish_request',
-        CronName: 'manager',
-        Client: client.slug,
-        Date: new Date().toISOString(),
-        Reason: alert.message,
-        Value: 'urgent',
-      });
-
-      actions.push({
-        action: `Triggered emergency replenish for ${client.name}`,
-        client: client.name,
-        detail: alert.message,
-        automated: true,
-      });
+  if (replenishAlerts.length > 0) {
+    // Actually trigger the prospect-replenish cron endpoint
+    const baseUrl = process.env.VERCEL_URL
+      ? `https://${process.env.VERCEL_URL}`
+      : 'https://pror-engine.vercel.app';
+    try {
+      const headers = {};
+      if (process.env.CRON_SECRET) {
+        headers.Authorization = `Bearer ${process.env.CRON_SECRET}`;
+      }
+      await fetch(`${baseUrl}/api/cron/prospect-replenish`, { method: 'GET', headers });
+      console.log('[manager] Emergency replenish triggered via HTTP');
+    } catch (err) {
+      console.error('[manager] Emergency replenish call failed:', err.message);
     }
+
+    // Log the action
+    await airtableCreate('ManagerActions', {
+      Date: new Date().toISOString(),
+      Action: 'emergency_replenish',
+      Client: replenishAlerts.map(a => a.client).join(', '),
+      Reason: replenishAlerts.map(a => `${a.client}: ${a.message}`).join('; '),
+      Detail: 'Emergency replenishment triggered via HTTP call to prospect-replenish',
+      Automated: true,
+    });
+
+    actions.push({
+      action: `Triggered emergency replenish for ${replenishAlerts.map(a => a.client).join(', ')}`,
+      client: replenishAlerts.map(a => a.client).join(', '),
+      detail: 'Called /api/cron/prospect-replenish endpoint',
+      automated: true,
+    });
   }
 
   // 5d. Pause sender domains with critical bounce rates

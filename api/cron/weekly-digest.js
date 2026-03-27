@@ -677,7 +677,10 @@ module.exports = async (req, res) => {
 
   waitUntil(
     run()
-      .then(result => console.error(`[weekly-digest] Done:`, JSON.stringify(result)))
+      .then(async result => {
+        console.error(`[weekly-digest] Done:`, JSON.stringify(result));
+        await airtable.logCronRun('weekly-digest').catch(() => {});
+      })
       .catch(err => console.error('[weekly-digest] Fatal:', err))
   );
 

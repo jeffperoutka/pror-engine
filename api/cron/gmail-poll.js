@@ -1037,9 +1037,10 @@ module.exports = async (req, res) => {
   const replayHours = parseInt(req.query?.hours || '24', 10);
 
   const processingPromise = (replay ? replayInbox(replayHours) : processInbox())
-    .then(result => {
+    .then(async result => {
       const tag = replay ? 'R' : 'P';
       console.error(`[${tag}] done=${result.processed} ${result.error || ''}`);
+      await airtable.logCronRun('gmail-poll').catch(() => {});
     })
     .catch(err => {
       console.error('[gmail-poll] Fatal:', err);

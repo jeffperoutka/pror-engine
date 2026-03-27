@@ -322,6 +322,38 @@ async function getABTests(status = 'running') {
   }
 }
 
+// ========== SYSTEM HEALTH ==========
+
+/**
+ * Log a cron run to SystemHealth table so the manager can verify crons are running.
+ * Upserts by CronName — updates existing record or creates new one.
+ */
+async function logCronRun(cronName) {
+  const base = getBase();
+  try {
+    // Find existing record for this cron
+    const existing = await base('SystemHealth').select({
+      filterByFormula: `AND({Type} = "cron_run", {CronName} = "${cronName}")`,
+      maxRecords: 1,
+    }).all();
+
+    const fields = {
+      Type: 'cron_run',
+      CronName: cronName,
+      Date: new Date().toISOString(),
+    };
+
+    if (existing.length > 0) {
+      await base('SystemHealth').update(existing[0].id, { Date: fields.Date });
+    } else {
+      await base('SystemHealth').create(fields);
+    }
+  } catch (err) {
+    // Non-fatal — don't break cron execution for health logging
+    console.error(`[airtable] logCronRun(${cronName}) failed:`, err.message);
+  }
+}
+
 module.exports = {
   getBase,
   getClients,
@@ -345,4 +377,6 @@ module.exports = {
   // A/B Testing
   logABTest,
   getABTests,
+  // System Health
+  logCronRun,
 };
