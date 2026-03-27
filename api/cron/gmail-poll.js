@@ -267,6 +267,61 @@ async function updateOutreachRecord(domain, updates) {
   }
 }
 
+// ── Auto-add confirmed sites to MAIN and WITH RATES ─────────────────────────
+
+async function addConfirmedSiteToDatabase(domain, email, classification, outreachRecord) {
+  const base = airtable.getBase();
+  const contact = email.from.match(/<([^>]+)>/) ? email.from.match(/<([^>]+)>/)[1] : email.from.trim();
+  const dr = outreachRecord?.DR || outreachRecord?.dr || 0;
+  const traffic = outreachRecord?.Traffic || outreachRecord?.['AHREF TRAFFIC'] || 0;
+  const tf = outreachRecord?.TF || outreachRecord?.['Trust Flow'] || 0;
+  const price = classification.price_mentioned || 0;
+  const client = outreachRecord?.Client || '';
+
+  try {
+    // Check if already in MAIN
+    const existing = await base('MAIN').select({
+      filterByFormula: `LOWER({PROSPECT SITE}) = "${domain.toLowerCase()}"`,
+      maxRecords: 1,
+    }).all();
+
+    if (existing.length === 0) {
+      // Add to MAIN table
+      await base('MAIN').create({
+        'PROSPECT SITE': domain,
+        'CONTACT': contact,
+        'DOMAIN RATING': String(dr),
+        'AHREF TRAFFIC': String(traffic),
+        'TRUST FLOW': String(tf),
+        'GUEST POST (GENERAL)': price,
+        'LINK INSERTION (GENERAL)': Math.round(price * 0.7), // LI typically ~70% of GP
+      });
+      console.error(`[DB] Added ${domain} to MAIN (GP:$${price})`);
+    }
+
+    // Check if already in WITH RATES
+    const existingRates = await base('WITH RATES').select({
+      filterByFormula: `FIND("${domain.toLowerCase()}", LOWER({WEBSITES}))`,
+      maxRecords: 1,
+    }).all();
+
+    if (existingRates.length === 0) {
+      await base('WITH RATES').create({
+        'CONTACT': contact,
+        'WEBSITES': domain,
+        'DR': String(dr),
+        'AHREF TRAFFIC': String(traffic),
+        'TF': tf ? Number(tf) : null,
+        'GP': `$${price}`,
+        'LI': `$${Math.round(price * 0.7)}`,
+      });
+      console.error(`[DB] Added ${domain} to WITH RATES (GP:$${price})`);
+    }
+  } catch (err) {
+    console.error(`[DB] addConfirmedSite err=${err.message?.slice(0, 60)}`);
+  }
+}
+
 // ── Drip Cancellation (Feature A) ───────────────────────────────────────────
 
 async function cancelDripsForDomain(domain) {
@@ -630,6 +685,11 @@ async function processInbox() {
             airtableUpdates['Confirmed Price'] = c.price_mentioned;
           }
           await updateOutreachRecord(senderDomain, airtableUpdates);
+
+          // ── Auto-add to MAIN + WITH RATES when price is confirmed ──
+          if (c.price_confirmed && c.price_mentioned <= maxPrice) {
+            await addConfirmedSiteToDatabase(senderDomain, email, c, outreachRecord);
+          }
         }
 
         // ── AUTO-REPLY: send immediately unless flagged for Jeff or recent auto-reply ──
@@ -728,7 +788,8 @@ async function replayInbox(hours = 24) {
   const since = new Date(Date.now() - hours * 60 * 60 * 1000);
   const afterDate = `${since.getFullYear()}/${String(since.getMonth() + 1).padStart(2, '0')}/${String(since.getDate()).padStart(2, '0')}`;
   const userEmail = process.env.GMAIL_USER_EMAIL || 'daniel@aeolabs.ai';
-  const query = `in:inbox after:${afterDate} -from:${userEmail}`;
+  // Search anywhere (not just inbox) to catch archived/processed emails too
+  const query = `after:${afterDate} -from:${userEmail} -in:sent -in:drafts -in:trash`;
 
   console.error(`[R] q=${query.slice(0, 50)}`);
   const msgList = await gmail.listMessages(query, 50);
