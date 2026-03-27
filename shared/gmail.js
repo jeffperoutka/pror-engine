@@ -65,6 +65,25 @@ function decodeBase64(str) {
   return Buffer.from(str.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf-8');
 }
 
+/**
+ * Fix double/triple-encoded UTF-8 in email headers.
+ * Pattern: "Ã" chars appear when UTF-8 bytes are misread as Latin-1 and re-encoded.
+ */
+function fixEncoding(str) {
+  if (!str) return str;
+  let result = str;
+  for (let i = 0; i < 5; i++) {
+    if (!/[\xC0-\xFF]/.test(result) && !/Ã/.test(result)) break;
+    try {
+      const buf = Buffer.from(result, 'latin1');
+      const decoded = buf.toString('utf-8');
+      if (decoded === result) break;
+      result = decoded;
+    } catch { break; }
+  }
+  return result;
+}
+
 function extractText(parts) {
   let text = '';
   for (const part of (parts || [])) {
@@ -117,9 +136,9 @@ async function getMessage(messageId) {
     id: msg.id,
     threadId: msg.threadId,
     messageId: headers['message-id'] || '',
-    from: headers['from'] || '',
+    from: fixEncoding(headers['from'] || ''),
     to: headers['to'] || '',
-    subject: headers['subject'] || '(no subject)',
+    subject: fixEncoding(headers['subject'] || '(no subject)'),
     date: headers['date'] || '',
     snippet: msg.snippet || '',
     body: body.slice(0, 1500),
@@ -247,6 +266,39 @@ async function hasLabel(messageId, labelName) {
 }
 
 /**
+ * Get all messages in a Gmail thread (for displaying back-and-forth conversation)
+ * @param {string} threadId - Gmail thread ID
+ * @returns {Array<object>} Messages in chronological order with from, subject, body, date
+ */
+async function getThread(threadId) {
+  const token = await getAccessToken();
+  const thread = await gmailFetch(token, `/threads/${threadId}?format=full`);
+  const messages = [];
+  for (const msg of (thread.messages || [])) {
+    const headers = {};
+    for (const h of (msg.payload?.headers || [])) {
+      headers[h.name.toLowerCase()] = h.value;
+    }
+    let body = '';
+    if (msg.payload?.body?.data) {
+      body = decodeBase64(msg.payload.body.data);
+    } else if (msg.payload?.parts) {
+      body = extractText(msg.payload.parts);
+    }
+    messages.push({
+      id: msg.id,
+      from: fixEncoding(headers['from'] || ''),
+      to: headers['to'] || '',
+      subject: fixEncoding(headers['subject'] || ''),
+      date: headers['date'] || '',
+      body: body.slice(0, 1500),
+      snippet: msg.snippet || '',
+    });
+  }
+  return messages;
+}
+
+/**
  * Get count of unread messages (for digest)
  */
 async function getUnreadCount() {
@@ -279,6 +331,7 @@ module.exports = {
   getAccessToken,
   listMessages,
   getMessage,
+  getThread,
   sendReply,
   markAsRead,
   archiveMessage,
