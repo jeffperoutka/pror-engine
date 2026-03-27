@@ -267,6 +267,109 @@ async function updateOutreachRecord(domain, updates) {
   }
 }
 
+// ── Site Category Classification via AI ──────────────────────────────────────
+
+// These are the EXACT valid Main Category values in the MAIN Airtable table.
+// AI must pick ONLY from this list. This is critical — wrong categories break reports.
+const VALID_MAIN_CATEGORIES = [
+  'ADULT', 'AI', 'ARTS', 'AUTOMOBILE', 'BEAUTY', 'BLOGS', 'BUSINESS', 'CAREER',
+  'CASINO', 'CBD', 'CORPORATE', 'E-COMMERCE', 'E-MAGAZINE', 'EDUCATION',
+  'ENTERTAINMENT', 'ENVIRONMENT', 'FAMILY', 'FASHION', 'FINANCE', 'FOOD & DRINK',
+  'GAMBLING', 'GAMING', 'GENERAL', 'HEALTH & WELLNESS', 'HOME & GARDEN', 'HR',
+  'INDUSTRIAL ', 'LEGAL', 'LIFESTYLE', 'LOGISTICS', 'MUSIC', 'NEWS', 'OTHER',
+  'PET', 'PHOTOGRAPHY', 'REAL ESTATE', 'RECREATION', 'RELIGION', 'SAAS', 'SEO',
+  'SHIPPING & LOGISTICS', 'SOCIETY', 'SPORTS', 'TECHNOLOGY', 'TOURISM', 'TRAVEL',
+  'CLEANING', 'FOOD', 'HOME & GARDENING', 'JOURNAL', 'CRYPTO', 'AVIATION', 'PETS',
+  'WEAPONRY',
+];
+
+// Valid CATEGORY values for WITH RATES and OUTREACH tables (singleSelect)
+const VALID_RATES_CATEGORIES = [
+  'ADULT', 'ARTS', 'AUTOMOBILE', 'AVIATION', 'BEAUTY', 'BETTING', 'BUSINESS',
+  'CBD', 'CLEANING', 'COMMUNITY (LGBTQ+)', 'CRYPTO', 'EDUCATION', 'ENTERTAINMENT',
+  'ENVIRONMENT', 'FAMILY', 'FASHION', 'FOOD', 'GENERAL', 'GIFTING', 'HEALTH',
+  'HEALTH & WELLNESS', 'HOME & GARDENING', 'JOURNAL', 'LEGAL', 'LIFESTYLE',
+  'LOGISTIC', 'PETS', 'REAL ESTATE', 'SAAS', 'SOCIETY', 'SPORTS', 'TECHNOLOGY',
+  'TRAVEL', 'WEAPONRY',
+];
+
+async function classifySiteCategory(domain) {
+  try {
+    // Fetch site homepage to understand what it's about
+    let siteContent = '';
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 8000);
+      const resp = await fetch(`https://${domain}`, {
+        signal: controller.signal,
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; PROR-Bot/1.0)' },
+        redirect: 'follow',
+      });
+      clearTimeout(timeout);
+      if (resp.ok) {
+        const html = await resp.text();
+        // Extract title and meta description, plus some body text
+        const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+        const metaMatch = html.match(/<meta[^>]*name=["']description["'][^>]*content=["']([^"']+)["']/i);
+        const title = titleMatch ? titleMatch[1].trim() : '';
+        const meta = metaMatch ? metaMatch[1].trim() : '';
+        // Strip HTML tags and get first ~500 chars of visible text
+        const bodyText = html
+          .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+          .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+          .replace(/<[^>]+>/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .slice(0, 500);
+        siteContent = `Title: ${title}\nMeta: ${meta}\nContent: ${bodyText}`;
+      }
+    } catch {
+      siteContent = `Could not fetch site. Domain name: ${domain}. Classify based on domain name alone.`;
+    }
+
+    const prompt = `You are classifying a website into categories for a link building database. Based on the domain name and site content, pick the BEST matching categories.
+
+DOMAIN: ${domain}
+
+SITE INFO:
+${siteContent.slice(0, 600)}
+
+VALID MAIN CATEGORIES (pick 1-3 that fit best, from this EXACT list):
+${VALID_MAIN_CATEGORIES.join(', ')}
+
+VALID SINGLE CATEGORY for rates table (pick exactly 1 from this list):
+${VALID_RATES_CATEGORIES.join(', ')}
+
+Rules:
+- Pick 1-3 Main Categories that genuinely describe the site's content
+- Use GENERAL only if nothing else fits
+- The category names must match EXACTLY (case-sensitive, including trailing spaces)
+- For the single rates category, pick the ONE best fit
+
+Respond with ONLY valid JSON:
+{"main_categories": ["CAT1", "CAT2"], "rates_category": "CAT1"}`;
+
+    const raw = await ai.complete(prompt, '', {
+      model: 'claude-haiku-4-5-20251001',
+      maxTokens: 200,
+      temperature: 0.1,
+    });
+
+    const cleaned = raw.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+    const result = JSON.parse(cleaned);
+
+    // Validate — only keep categories that are in our valid lists
+    const mainCats = (result.main_categories || []).filter(c => VALID_MAIN_CATEGORIES.includes(c));
+    const ratesCat = VALID_RATES_CATEGORIES.includes(result.rates_category) ? result.rates_category : null;
+
+    console.error(`[CAT] ${domain} → main:[${mainCats.join(',')}] rates:${ratesCat}`);
+    return { mainCategories: mainCats.length > 0 ? mainCats : ['GENERAL'], ratesCategory: ratesCat || 'GENERAL' };
+  } catch (err) {
+    console.error(`[CAT] classify err: ${err.message?.slice(0, 40)}`);
+    return { mainCategories: ['GENERAL'], ratesCategory: 'GENERAL' };
+  }
+}
+
 // ── Auto-add confirmed sites to MAIN and WITH RATES ─────────────────────────
 
 async function addConfirmedSiteToDatabase(domain, email, classification, outreachRecord) {
@@ -276,7 +379,9 @@ async function addConfirmedSiteToDatabase(domain, email, classification, outreac
   const traffic = outreachRecord?.Traffic || outreachRecord?.['AHREF TRAFFIC'] || 0;
   const tf = outreachRecord?.TF || outreachRecord?.['Trust Flow'] || 0;
   const price = classification.price_mentioned || 0;
-  const client = outreachRecord?.Client || '';
+
+  // Classify the site's category using AI
+  const { mainCategories, ratesCategory } = await classifySiteCategory(domain);
 
   try {
     // Check if already in MAIN
@@ -286,7 +391,6 @@ async function addConfirmedSiteToDatabase(domain, email, classification, outreac
     }).all();
 
     if (existing.length === 0) {
-      // Add to MAIN table
       await base('MAIN').create({
         'PROSPECT SITE': domain,
         'CONTACT': contact,
@@ -294,9 +398,10 @@ async function addConfirmedSiteToDatabase(domain, email, classification, outreac
         'AHREF TRAFFIC': String(traffic),
         'TRUST FLOW': String(tf),
         'GUEST POST (GENERAL)': price,
-        'LINK INSERTION (GENERAL)': Math.round(price * 0.7), // LI typically ~70% of GP
+        'LINK INSERTION (GENERAL)': Math.round(price * 0.7),
+        'Main Category': mainCategories,
       });
-      console.error(`[DB] Added ${domain} to MAIN (GP:$${price})`);
+      console.error(`[DB] Added ${domain} to MAIN (GP:$${price} cat:${mainCategories[0]})`);
     }
 
     // Check if already in WITH RATES
@@ -309,13 +414,14 @@ async function addConfirmedSiteToDatabase(domain, email, classification, outreac
       await base('WITH RATES').create({
         'CONTACT': contact,
         'WEBSITES': domain,
+        'CATEGORY': ratesCategory,
         'DR': String(dr),
         'AHREF TRAFFIC': String(traffic),
         'TF': tf ? Number(tf) : null,
         'GP': `$${price}`,
         'LI': `$${Math.round(price * 0.7)}`,
       });
-      console.error(`[DB] Added ${domain} to WITH RATES (GP:$${price})`);
+      console.error(`[DB] Added ${domain} to WITH RATES (GP:$${price} cat:${ratesCategory})`);
     }
   } catch (err) {
     console.error(`[DB] addConfirmedSite err=${err.message?.slice(0, 60)}`);
