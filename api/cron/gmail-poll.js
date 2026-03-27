@@ -863,6 +863,30 @@ async function replayInbox(hours = 24) {
 
       const dr = outreachRecord?.DR || outreachRecord?.dr || 0;
       const maxPrice = getMaxPrice(dr);
+
+      // ── Log negotiation to Airtable (backfill) ──
+      if (c.type === 'reply_to_outreach' || c.type === 'inbound_pitch') {
+        await airtable.logNegotiation({
+          domain: senderDomain,
+          client: outreachRecord?.Client || '',
+          round,
+          direction: 'inbound',
+          theirPrice: c.price_mentioned || null,
+          ourOffer: c.our_counter_offer || null,
+          dr,
+          sentiment: c.sentiment || 'neutral',
+          action: c.suggested_action || '',
+          summary: (c.summary || '').slice(0, 200),
+          threadId: email.threadId,
+          autoReplied: false,
+        }).catch(e => console.error(`[REPLAY] neg log err: ${e.message?.slice(0, 40)}`));
+
+        // Auto-add confirmed sites to MAIN + WITH RATES
+        if (c.price_confirmed && c.price_mentioned <= maxPrice) {
+          await addConfirmedSiteToDatabase(senderDomain, email, c, outreachRecord).catch(() => {});
+        }
+      }
+
       const { blocks, fallbackText } = buildSlackBlocks(email, c, {
         round,
         dr,
