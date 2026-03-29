@@ -1040,7 +1040,7 @@ module.exports = async (req, res) => {
     .then(async result => {
       const tag = replay ? 'R' : 'P';
       console.error(`[${tag}] done=${result.processed} ${result.error || ''}`);
-      await airtable.logCronRun('gmail-poll').catch(() => {});
+      await airtable.logCronRun('gmail-poll').catch(e => console.error('[gmail-poll] logCronRun failed:', e.message));
     })
     .catch(err => {
       console.error('[gmail-poll] Fatal:', err);

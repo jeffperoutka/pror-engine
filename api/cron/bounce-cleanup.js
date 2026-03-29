@@ -413,7 +413,7 @@ async function run() {
 module.exports = async (req, res) => {
   waitUntil(run().then(async () => {
     const { logCronRun } = require('../../shared/airtable');
-    await logCronRun('bounce-cleanup').catch(() => {});
+    await logCronRun('bounce-cleanup').catch(e => console.error('[bounce-cleanup] logCronRun:', e.message));
   }));
   res.status(200).json({ ok: true });
 };

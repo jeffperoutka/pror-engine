@@ -1026,7 +1026,7 @@ module.exports = async (req, res) => {
   const processingPromise = run()
     .then(async result => {
       console.log(`[self-improve] Complete:`, JSON.stringify(result));
-      await airtable.logCronRun('self-improve').catch(() => {});
+      await airtable.logCronRun('self-improve').catch(e => console.error('[self-improve] logCronRun:', e.message));
     })
     .catch(err => {
       console.error('[self-improve] Fatal:', err);

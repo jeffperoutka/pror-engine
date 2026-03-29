@@ -278,7 +278,7 @@ async function run() {
 module.exports = async (req, res) => {
   waitUntil(run().then(async () => {
     const { logCronRun } = require('../../shared/airtable');
-    await logCronRun('sender-health').catch(() => {});
+    await logCronRun('sender-health').catch(e => console.error('[sender-health] logCronRun:', e.message));
   }));
   res.status(200).json({ ok: true, message: 'Sender health check started' });
 };

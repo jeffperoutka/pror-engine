@@ -74,7 +74,8 @@ const THRESHOLDS = {
 function getBase() {
   const Airtable = require('airtable');
   Airtable.configure({ apiKey: AIRTABLE_PAT });
-  return Airtable.base(AIRTABLE_BASE);
+  // Trim env var in case of trailing whitespace/newlines
+  return Airtable.base((AIRTABLE_BASE || '').trim());
 }
 
 async function airtableSelect(table, opts = {}) {
@@ -249,14 +250,18 @@ async function checkPipelineIntegrity() {
   const alerts = [];
 
   // 2a. Prospect inventory per client — check queued Brevo campaigns per client
-  // The Outreach table doesn't have Status or Client fields, so we count
-  // queued campaigns in Brevo as the source of truth for pipeline health.
   let queuedCampaigns = [];
   try {
     const data = await brevoFetch('/emailCampaigns?status=queued&limit=200&offset=0');
     queuedCampaigns = data.campaigns || [];
+    console.log(`[manager] Brevo queued campaigns: ${queuedCampaigns.length}`);
   } catch (err) {
     console.error('[manager] Failed to fetch queued campaigns:', err.message);
+    alerts.push({
+      level: 'critical',
+      client: 'SYSTEM',
+      message: `Brevo API error: ${err.message?.slice(0, 100)}`,
+    });
   }
 
   const queuedByClient = {};
@@ -441,8 +446,26 @@ async function detectAnomalies() {
     // Skip clients with no recent data
     if (recent.sent === 0) continue;
 
-    // Open rate drop > 20%
-    if (prior.openRate > 0 && recent.openRate > 0) {
+    // CRITICAL: 0% open rate with significant volume = deliverability failure
+    if (recent.opens === 0 && recent.sent >= 20) {
+      anomalies.push({
+        level: 'critical',
+        client: client.name,
+        metric: 'zero_opens',
+        message: `0% open rate on ${recent.sent} emails — ALL emails likely going to spam. Pause campaigns and check DNS/DKIM/SPF for sender domains.`,
+        autoFixable: 'pause_campaigns',
+      });
+    } else if (recent.openRate > 0 && recent.openRate < 0.03 && recent.sent >= 20) {
+      // Open rate below 3% = severe deliverability issue
+      anomalies.push({
+        level: 'critical',
+        client: client.name,
+        metric: 'open_rate',
+        message: `Open rate ${(recent.openRate * 100).toFixed(1)}% on ${recent.sent} emails — severe deliverability issue. Check sender reputation.`,
+        autoFixable: 'reduce_volume',
+      });
+    } else if (prior.openRate > 0 && recent.openRate > 0) {
+      // Open rate drop > 20% vs prior period
       const dropPct = ((prior.openRate - recent.openRate) / prior.openRate) * 100;
       if (dropPct > THRESHOLDS.openRateDropPct) {
         anomalies.push({
@@ -728,10 +751,52 @@ async function executeAutoFixes(pipelineAlerts, anomalies) {
     }
   }
 
-  // Log all actions to Airtable for audit trail
-  for (const action of actions) {
-    if (!action._logged) {
-      // Already logged in the specific handlers above
+  // 5e. Auto-pause campaigns for clients with 0% open rate (deliverability failure)
+  const zeroOpenAlerts = anomalies.filter(a => a.autoFixable === 'pause_campaigns' && a.metric === 'zero_opens');
+  for (const alert of zeroOpenAlerts) {
+    const client = CLIENTS.find(c => c.name === alert.client);
+    if (client) {
+      let pausedCount = 0;
+      try {
+        const queuedData = await brevoFetch('/emailCampaigns?status=queued&limit=200&offset=0');
+        const queued = queuedData.campaigns || [];
+
+        for (const campaign of queued) {
+          const senderEmail = campaign.sender?.email || '';
+          const senderDomain = senderEmail.split('@')[1]?.toLowerCase() || '';
+          if (client.senderDomains.some(d => senderDomain === d || senderDomain.endsWith('.' + d))) {
+            try {
+              await brevoFetch(`/emailCampaigns/${campaign.id}`, {
+                method: 'PUT',
+                body: { status: 'suspended' },
+              });
+              pausedCount++;
+            } catch {
+              // Some campaigns may not be suspendable
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`[manager] Error pausing campaigns for ${client.name}:`, err.message);
+      }
+
+      if (pausedCount > 0) {
+        await airtableCreate('ManagerActions', {
+          Date: new Date().toISOString(),
+          Action: 'pause_zero_opens',
+          Client: client.name,
+          Reason: `0% open rate — all emails going to spam`,
+          Detail: `Paused ${pausedCount} campaigns. Check DNS/DKIM/SPF for ${client.senderDomains.join(', ')}`,
+          Automated: true,
+        });
+
+        actions.push({
+          action: `⛔ PAUSED ${pausedCount} campaigns for ${client.name} — 0% open rate, emails going to spam. Check DKIM/SPF for: ${client.senderDomains.join(', ')}`,
+          client: client.name,
+          detail: 'Deliverability failure — campaigns auto-paused until DNS is fixed',
+          automated: true,
+        });
+      }
     }
   }
 
@@ -771,7 +836,7 @@ async function generateSuggestions(costAnalysis, anomalies) {
 // SECTION 7: SLACK REPORT
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, autoActions, suggestions, quickStats) {
+async function postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, autoActions, suggestions, quickStats, deliverability = {}) {
   const now = new Date();
   const timeSAST = now.toLocaleTimeString('en-US', {
     timeZone: 'Africa/Johannesburg',
@@ -794,6 +859,24 @@ async function postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, 
     msg += `${emoji} ${cron.cronName}: ${cron.detail}\n`;
   }
   msg += '\n';
+
+  // ── Deliverability Health ──
+  if (deliverability.totalSent > 0) {
+    const openPct = (deliverability.overallOpenRate * 100).toFixed(1);
+    const replyPct = (deliverability.overallReplyRate * 100).toFixed(1);
+    const bouncePct = (deliverability.overallBounceRate * 100).toFixed(1);
+    const openEmoji = deliverability.overallOpenRate === 0 ? '\ud83d\udea8' : deliverability.overallOpenRate < 0.1 ? '\u26a0\ufe0f' : '\u2705';
+    const pollEmoji = deliverability.gmailPollHealthy ? '\u2705' : '\ud83d\udea8';
+
+    msg += `\u2501\u2501\u2501 DELIVERABILITY (7-day) \u2501\u2501\u2501\n`;
+    msg += `${openEmoji} Open rate: ${openPct}% | Replies: ${deliverability.totalReplies} | Bounce: ${bouncePct}%\n`;
+    msg += `\ud83d\udce7 Sent: ${deliverability.totalSent} | Delivered: ${deliverability.totalDelivered}\n`;
+    msg += `${pollEmoji} Gmail-poll: ${deliverability.gmailPollLastRun !== null ? `last ran ${Math.round(deliverability.gmailPollLastRun)} min ago` : 'never logged — may be failing silently'}\n`;
+    if (deliverability.overallOpenRate === 0) {
+      msg += `\ud83d\udea8 *CRITICAL: 0% open rate = all emails going to spam. Check DKIM/SPF/DMARC on all sender domains.*\n`;
+    }
+    msg += '\n';
+  }
 
   // ── Pipeline Alerts ──
   if (pipelineAlerts.length > 0) {
@@ -944,20 +1027,49 @@ async function run() {
     const recentCampaigns = await getRecentCampaigns(sevenDaysAgo, todayStr);
     const recentByClient = campaignsByClient(recentCampaigns);
 
-    // 5. Cost efficiency analysis
+    // 5. Deliverability health — aggregate open/reply stats across all clients
+    const allRecentStats = aggregateStats(recentCampaigns);
+    const deliverability = {
+      totalSent: allRecentStats.sent,
+      totalDelivered: allRecentStats.delivered,
+      totalOpens: allRecentStats.opens,
+      totalReplies: allRecentStats.replies,
+      overallOpenRate: allRecentStats.openRate,
+      overallReplyRate: allRecentStats.replyRate,
+      overallBounceRate: allRecentStats.bounceRate,
+      gmailPollHealthy: true, // assume healthy until proven otherwise
+    };
+
+    // Check gmail-poll health: if SystemHealth has a recent entry, it's running
+    const gmailPollRecords = await airtableSelect('SystemHealth', {
+      filterByFormula: `AND({Type} = "cron_run", {CronName} = "gmail-poll")`,
+      sort: [{ field: 'Date', direction: 'desc' }],
+      maxRecords: 1,
+    });
+    if (gmailPollRecords.length > 0) {
+      const lastRun = new Date(gmailPollRecords[0].Date || gmailPollRecords[0].LastRun).getTime();
+      const minutesAgo = (Date.now() - lastRun) / 60000;
+      deliverability.gmailPollLastRun = minutesAgo;
+      deliverability.gmailPollHealthy = minutesAgo < 10; // should run every 2 min
+    } else {
+      deliverability.gmailPollLastRun = null;
+      deliverability.gmailPollHealthy = false; // never logged = probably failing
+    }
+
+    // 6. Cost efficiency analysis
     const costAnalysis = await analyzeCostEfficiency(recentByClient);
 
-    // 6. Auto-fix (conservative actions only)
+    // 7. Auto-fix (takes action on critical issues)
     const autoActions = await executeAutoFixes(pipelineAlerts, anomalies);
 
-    // 7. AI suggestions
+    // 8. AI suggestions
     const suggestions = await generateSuggestions(costAnalysis, anomalies);
 
-    // 8. Quick stats
+    // 9. Quick stats
     const quickStats = await gatherQuickStats();
 
-    // 9. Post Slack report
-    await postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, autoActions, suggestions, quickStats);
+    // 10. Post Slack report
+    await postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, autoActions, suggestions, quickStats, deliverability);
 
     // 10. Log this Manager run to SystemHealth
     await airtableCreate('SystemHealth', {

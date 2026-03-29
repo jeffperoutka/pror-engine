@@ -773,7 +773,7 @@ module.exports = async function handler(req, res) {
     .then(async result => {
       console.log(`Replenishment complete: ${result.totalNewProspects} new prospects, $${result.totalCost.toFixed(2)} cost`);
       const { logCronRun } = require('../../shared/airtable');
-      await logCronRun('prospect-replenish').catch(() => {});
+      await logCronRun('prospect-replenish').catch(e => console.error('[prospect-replenish] logCronRun:', e.message));
     })
     .catch(err => {
       console.error('Replenishment failed:', err);

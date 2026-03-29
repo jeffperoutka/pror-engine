@@ -20,7 +20,7 @@ module.exports = async (req, res) => {
   const channel = req.query?.channel || undefined;
   waitUntil(digest.execute({ channel }).then(async () => {
     const { logCronRun } = require('../../shared/airtable');
-    await logCronRun('digest').catch(() => {});
+    await logCronRun('digest').catch(e => console.error('[digest] logCronRun:', e.message));
   }));
   res.status(200).json({ ok: true, message: 'Digest triggered' });
 };
