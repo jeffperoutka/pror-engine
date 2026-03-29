@@ -177,7 +177,8 @@ function aggregateStats(campaigns) {
     const s = c.statistics?.globalStats || c.statistics?.campaignStats?.[0] || {};
     sent += s.sent || 0;
     delivered += s.delivered || 0;
-    opens += s.uniqueOpens || 0;
+    // Brevo API returns 'uniqueViews' for opens, not 'uniqueOpens'
+    opens += s.uniqueViews || s.uniqueOpens || 0;
     clicks += s.uniqueClicks || 0;
     replies += s.replied || s.uniqueReplies || 0;
     hardBounces += s.hardBounces || 0;
@@ -800,7 +801,130 @@ async function executeAutoFixes(pipelineAlerts, anomalies) {
     }
   }
 
+  // 5f. Auto-pause campaigns from unauthenticated domains
+  const unauthDomains = (pipelineAlerts || []).filter(a => a.autoFixable === 'pause_unauth_domain');
+  for (const alert of unauthDomains) {
+    let pausedCount = 0;
+    try {
+      const queuedData = await brevoFetch('/emailCampaigns?status=queued&limit=200&offset=0');
+      const queued = queuedData.campaigns || [];
+
+      for (const campaign of queued) {
+        const senderEmail = campaign.sender?.email || '';
+        const senderDomain = senderEmail.split('@')[1]?.toLowerCase() || '';
+        if (senderDomain === alert.meta.domain || senderDomain.endsWith('.' + alert.meta.domain)) {
+          try {
+            await brevoFetch(`/emailCampaigns/${campaign.id}`, {
+              method: 'PUT',
+              body: { status: 'suspended' },
+            });
+            pausedCount++;
+          } catch {
+            // Some campaigns may not be suspendable
+          }
+        }
+      }
+    } catch (err) {
+      console.warn(`[manager] Error pausing campaigns for unauth domain ${alert.meta.domain}:`, err.message);
+    }
+
+    if (pausedCount > 0) {
+      await airtableCreate('ManagerActions', {
+        Date: new Date().toISOString(),
+        Action: 'pause_unauth_domain',
+        Client: alert.client || 'ALL',
+        Reason: `Domain ${alert.meta.domain} not authenticated — missing ${alert.meta.missing.join(', ')}`,
+        Detail: `Paused ${pausedCount} campaigns. Emails from unauthenticated domains go to spam.`,
+        Automated: true,
+      });
+
+      actions.push({
+        action: `⛔ PAUSED ${pausedCount} campaigns from ${alert.meta.domain} — domain not authenticated (missing ${alert.meta.missing.join(', ')}). Add DNS records before resuming.`,
+        client: alert.client || 'ALL',
+        detail: `Domain ${alert.meta.domain} lacks ${alert.meta.missing.join(', ')}`,
+        automated: true,
+      });
+    }
+  }
+
   return actions;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SECTION 5.5: DOMAIN AUTHENTICATION CHECK
+// ─────────────────────────────────────────────────────────────────────────────
+
+async function checkDomainAuthentication() {
+  console.log('[manager] Checking domain authentication...');
+  const issues = [];
+
+  // Collect all unique sender domains from CLIENTS
+  const allSenderDomains = [...new Set(CLIENTS.flatMap(c => c.senderDomains))];
+
+  try {
+    const data = await brevoFetch('/senders/domains');
+    const domains = data.domains || [];
+
+    for (const d of domains) {
+      const name = d.domain_name;
+      // Only check domains we actively use
+      if (!allSenderDomains.some(sd => sd === name || sd.endsWith('.' + name))) continue;
+
+      if (!d.authenticated) {
+        const missing = [];
+        if (!d.dkim_record_status) missing.push('DKIM');
+        if (!d.spf_record_status) missing.push('SPF');
+        if (!d.dmarc_record_status) missing.push('DMARC');
+
+        // Find which clients use this domain
+        const affectedClients = CLIENTS.filter(c =>
+          c.senderDomains.some(sd => sd === name || sd.endsWith('.' + name))
+        ).map(c => c.name);
+
+        issues.push({
+          level: 'critical',
+          client: affectedClients.join(', ') || 'Unknown',
+          metric: 'domain_auth',
+          message: `${name}: NOT authenticated — missing ${missing.join(', ')}. Emails will go to spam.`,
+          autoFixable: 'pause_unauth_domain',
+          meta: { domain: name, missing, affectedClients },
+        });
+      }
+    }
+
+    // Check if any sender domains are completely missing from Brevo
+    const registeredRoots = domains.map(d => d.domain_name);
+    for (const sd of allSenderDomains) {
+      const parts = sd.split('.');
+      const root = parts.length > 2 ? parts.slice(-2).join('.') : sd;
+      if (!registeredRoots.includes(root) && !registeredRoots.includes(sd)) {
+        const affectedClients = CLIENTS.filter(c =>
+          c.senderDomains.includes(sd)
+        ).map(c => c.name);
+
+        issues.push({
+          level: 'critical',
+          client: affectedClients.join(', ') || 'Unknown',
+          metric: 'domain_missing',
+          message: `${sd}: NOT registered in Brevo — add and authenticate before sending.`,
+          autoFixable: 'pause_unauth_domain',
+          meta: { domain: sd, missing: ['NOT REGISTERED'], affectedClients },
+        });
+      }
+    }
+  } catch (err) {
+    console.error('[manager] Domain auth check failed:', err.message);
+    issues.push({
+      level: 'warning',
+      client: 'SYSTEM',
+      metric: 'domain_auth_error',
+      message: `Domain auth check failed: ${err.message}`,
+      autoFixable: false,
+      meta: {},
+    });
+  }
+
+  return issues;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -878,6 +1002,16 @@ async function postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, 
     msg += '\n';
   }
 
+  // ── Domain Authentication ──
+  const domainIssues = deliverability.domainAuthIssues || [];
+  if (domainIssues.length > 0) {
+    msg += `\u2501\u2501\u2501 \ud83d\udd10 DOMAIN AUTH \u2501\u2501\u2501\n`;
+    for (const issue of domainIssues) {
+      msg += `\ud83d\udd34 ${issue.message}\n`;
+    }
+    msg += '\n';
+  }
+
   // ── Pipeline Alerts ──
   if (pipelineAlerts.length > 0) {
     msg += `\u2501\u2501\u2501 PIPELINE ALERTS \u2501\u2501\u2501\n`;
@@ -945,7 +1079,8 @@ async function postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, 
 
   // Determine if we need to @channel for critical issues
   const hasCritical = pipelineAlerts.some(a => a.level === 'critical') ||
-                      anomalies.some(a => a.level === 'critical');
+                      anomalies.some(a => a.level === 'critical') ||
+                      domainIssues.length > 0;
   if (hasCritical) {
     msg = `<!channel> ${msg}`;
   }
@@ -1056,19 +1191,25 @@ async function run() {
       deliverability.gmailPollHealthy = false; // never logged = probably failing
     }
 
-    // 6. Cost efficiency analysis
+    // 6. Domain authentication check — critical for deliverability
+    const domainAuthIssues = await checkDomainAuthentication();
+    // Merge domain auth issues into pipeline alerts so auto-fix can act on them
+    pipelineAlerts.push(...domainAuthIssues);
+    deliverability.domainAuthIssues = domainAuthIssues;
+
+    // 7. Cost efficiency analysis
     const costAnalysis = await analyzeCostEfficiency(recentByClient);
 
-    // 7. Auto-fix (takes action on critical issues)
+    // 8. Auto-fix (takes action on critical issues, including unauth domain pauses)
     const autoActions = await executeAutoFixes(pipelineAlerts, anomalies);
 
-    // 8. AI suggestions
+    // 9. AI suggestions
     const suggestions = await generateSuggestions(costAnalysis, anomalies);
 
-    // 9. Quick stats
+    // 10. Quick stats
     const quickStats = await gatherQuickStats();
 
-    // 10. Post Slack report
+    // 11. Post Slack report
     await postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, autoActions, suggestions, quickStats, deliverability);
 
     // 10. Log this Manager run to SystemHealth

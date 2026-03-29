@@ -88,7 +88,7 @@ async function getStatsForDomain(domain) {
     const s = c.statistics?.globalStats || c.statistics || {};
     totalSent += s.sent || 0;
     totalDelivered += s.delivered || 0;
-    totalOpens += s.uniqueOpens || 0;
+    totalOpens += s.uniqueViews || s.uniqueOpens || 0;
     totalHardBounces += s.hardBounces || 0;
     totalSoftBounces += s.softBounces || 0;
     totalComplaints += s.complaints || s.spamReports || 0;
@@ -142,8 +142,69 @@ function statusEmoji(status) {
   return { healthy: '\u2705', warning: '\u26a0\ufe0f', critical: '\ud83d\udd34', inactive: '\u26aa' }[status] || '\u2753';
 }
 
+// ── Domain Authentication Check via Brevo API ──
+
+async function checkDomainAuthentication() {
+  const issues = [];
+  try {
+    const data = await brevoGet('/senders/domains');
+    const domains = data.domains || [];
+
+    for (const d of domains) {
+      const name = d.domain_name;
+      // Only check domains we actively send from
+      if (!SENDER_DOMAINS.some(sd => sd === name || sd.endsWith('.' + name))) continue;
+
+      if (!d.authenticated) {
+        const missing = [];
+        if (!d.dkim_record_status) missing.push('DKIM');
+        if (!d.spf_record_status) missing.push('SPF');
+        if (!d.dmarc_record_status) missing.push('DMARC');
+
+        issues.push({
+          domain: name,
+          verified: d.verified || false,
+          authenticated: false,
+          missing,
+          message: `${name}: NOT authenticated — missing ${missing.join(', ')}. Emails from this domain may go to spam.`,
+        });
+      }
+    }
+
+    // Check if any SENDER_DOMAINS are completely missing from Brevo
+    const registeredRoots = domains.map(d => d.domain_name);
+    for (const sd of SENDER_DOMAINS) {
+      // Get root domain
+      const parts = sd.split('.');
+      const root = parts.length > 2 ? parts.slice(-2).join('.') : sd;
+      if (!registeredRoots.includes(root) && !registeredRoots.includes(sd)) {
+        issues.push({
+          domain: sd,
+          verified: false,
+          authenticated: false,
+          missing: ['NOT REGISTERED'],
+          message: `${sd}: Not registered in Brevo at all — add and authenticate this domain.`,
+        });
+      }
+    }
+  } catch (err) {
+    console.error('[sender-health] Domain auth check failed:', err.message);
+    issues.push({
+      domain: 'SYSTEM',
+      verified: false,
+      authenticated: false,
+      missing: ['API_ERROR'],
+      message: `Domain auth check failed: ${err.message}`,
+    });
+  }
+  return issues;
+}
+
 async function run() {
   const results = [];
+
+  // Check domain authentication FIRST — this is the most critical check
+  const domainIssues = await checkDomainAuthentication();
 
   // Process domains in batches of 5 to avoid rate limits
   for (let i = 0; i < SENDER_DOMAINS.length; i += 5) {
@@ -221,6 +282,24 @@ async function run() {
         },
       ],
     });
+  }
+
+  // Domain authentication issues
+  if (domainIssues.length > 0) {
+    hasCritical = true;
+    blocks.push({ type: 'divider' });
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '*\ud83d\udd10 Domain Authentication Issues:*\n' +
+          domainIssues.map(d => `\ud83d\udd34 ${d.message}`).join('\n'),
+      },
+    });
+    // Add to action items
+    for (const d of domainIssues) {
+      actionItems.push(`\ud83d\udd34 *${d.domain}* — Add missing DNS records: ${d.missing.join(', ')}. PAUSE campaigns from this domain until fixed.`);
+    }
   }
 
   if (actionItems.length > 0) {

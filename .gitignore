@@ -6,3 +6,4 @@ service-account.json
 outputs/
 *.log
 .vercel
+.env*.local

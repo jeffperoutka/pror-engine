@@ -237,11 +237,11 @@ async function getCampaignStats(campaignId) {
     status: campaign.status,
     sent: stats.sent || 0,
     delivered: stats.delivered || 0,
-    opens: stats.uniqueOpens || 0,
+    opens: stats.uniqueViews || stats.uniqueOpens || 0,
     clicks: stats.uniqueClicks || 0,
     bounces: (stats.hardBounces || 0) + (stats.softBounces || 0),
     unsubscribed: stats.unsubscriptions || 0,
-    openRate: stats.sent ? ((stats.uniqueOpens || 0) / stats.sent * 100).toFixed(1) + '%' : '0%',
+    openRate: stats.sent ? (((stats.uniqueViews || stats.uniqueOpens || 0) / stats.sent) * 100).toFixed(1) + '%' : '0%',
     clickRate: stats.sent ? ((stats.uniqueClicks || 0) / stats.sent * 100).toFixed(1) + '%' : '0%',
   };
 }
