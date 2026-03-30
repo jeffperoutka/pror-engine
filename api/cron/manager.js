@@ -1068,6 +1068,21 @@ async function postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, 
     msg += '\n';
   }
 
+  // ── Prospect Pipeline (most important metric) ──
+  msg += `\u2501\u2501\u2501 \ud83c\udfaf PROSPECT PIPELINE \u2501\u2501\u2501\n`;
+  msg += `New sites added (7d): ${quickStats.newProspects7d} | Daily avg: ~${quickStats.newProspectsDailyAvg}/day\n`;
+  msg += `New sites added (this month): ${quickStats.newProspectsMonth}\n`;
+  msg += `New opportunities (sites replied, 7d): ${quickStats.newOpportunities7d} | Today: ${quickStats.newOpportunitiesToday}\n`;
+  if (quickStats.serpCost7d > 0) {
+    msg += `Prospecting cost (7d): $${quickStats.serpCost7d.toFixed(2)}\n`;
+  }
+  // Per-client breakdown if any data exists
+  const prospectEntries = Object.entries(quickStats.prospectsByClient || {}).filter(([, v]) => v > 0);
+  if (prospectEntries.length > 0) {
+    msg += `Per client (7d): ${prospectEntries.map(([k, v]) => `${k}: +${v}`).join(' | ')}\n`;
+  }
+  msg += '\n';
+
   // ── Quick Stats ──
   msg += `\u2501\u2501\u2501 \ud83d\udcca QUICK STATS \u2501\u2501\u2501\n`;
   msg += `Active clients: ${quickStats.activeClients} | `;
@@ -1096,6 +1111,7 @@ async function postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, 
 async function gatherQuickStats() {
   const todayStr = new Date().toISOString().split('T')[0];
   const thisMonth = todayStr.slice(0, 7);
+  const sevenDaysAgoStr = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 
   // Get today's campaign stats
   const todayCampaigns = await getRecentCampaigns(todayStr, todayStr);
@@ -1128,6 +1144,44 @@ async function gatherQuickStats() {
   });
   const revenue = monthFinances.reduce((sum, f) => sum + (f.Amount || 0), 0);
 
+  // ── Prospect Pipeline: new sites added as opportunities ──
+  // From OutreachCosts table (logged by prospect-replenish)
+  const outreachCosts7d = await airtableSelect('OutreachCosts', {
+    filterByFormula: `IS_AFTER({Date}, "${sevenDaysAgoStr}")`,
+  });
+  const outreachCostsMonth = await airtableSelect('OutreachCosts', {
+    filterByFormula: `DATETIME_FORMAT({Date}, 'YYYY-MM') = "${thisMonth}"`,
+  });
+
+  const newProspects7d = outreachCosts7d.reduce((sum, r) => sum + (r.NewProspects || 0), 0);
+  const newProspectsMonth = outreachCostsMonth.reduce((sum, r) => sum + (r.NewProspects || 0), 0);
+  const serpCost7d = outreachCosts7d.reduce((sum, r) => sum + (r.EstimatedCost || 0), 0);
+
+  // Per-client breakdown for the last 7 days
+  const prospectsByClient = {};
+  for (const r of outreachCosts7d) {
+    const client = r.Client || 'Unknown';
+    prospectsByClient[client] = (prospectsByClient[client] || 0) + (r.NewProspects || 0);
+  }
+
+  // New sites that replied with rates (added to MAIN table)
+  // Use CREATED_TIME() to filter recent entries
+  let newOpportunities7d = 0;
+  try {
+    const recentMain = await airtableSelect('MAIN', {
+      filterByFormula: `IS_AFTER(CREATED_TIME(), "${sevenDaysAgoStr}")`,
+    });
+    newOpportunities7d = recentMain.length;
+  } catch { /* CREATED_TIME filter may not work on all Airtable plans */ }
+
+  let newOpportunitiesToday = 0;
+  try {
+    const todayMain = await airtableSelect('MAIN', {
+      filterByFormula: `IS_AFTER(CREATED_TIME(), "${todayStr}")`,
+    });
+    newOpportunitiesToday = todayMain.length;
+  } catch { /* fallback: 0 */ }
+
   return {
     activeClients: CLIENTS.length,
     emailsToday: todayStats.sent,
@@ -1135,6 +1189,14 @@ async function gatherQuickStats() {
     openNegotiations: uniqueNegDomains.size,
     linksThisMonth: monthLinks.length,
     revenueThisMonth: Math.round(revenue),
+    // Prospect pipeline
+    newProspects7d,
+    newProspectsMonth,
+    newProspectsDailyAvg: Math.round(newProspects7d / 7),
+    serpCost7d: Math.round(serpCost7d * 100) / 100,
+    prospectsByClient,
+    newOpportunities7d,
+    newOpportunitiesToday,
   };
 }
 
