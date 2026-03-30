@@ -14,9 +14,9 @@ const slack = require('../shared/slack');
 const gmail = require('../shared/gmail');
 const ai = require('../shared/ai');
 
-const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY;
+const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY || process.env.AIRTABLE_PAT;
 const MASTERSHEETS = 'appEGWJRxSrTv3IOL';
-const PROR_DB = process.env.AIRTABLE_BASE_ID || 'app3v0KJ4kQimscg3';
+const PROR_DB = (process.env.AIRTABLE_BASE_ID || process.env.AIRTABLE_BASE || 'app3v0KJ4kQimscg3').trim();
 
 // ── Airtable direct fetch (for MASTERSHEETS cross-base queries) ─────────────
 
@@ -185,6 +185,42 @@ async function getBotActivity() {
   }
 }
 
+// ── Prospect pipeline (new sites added as opportunities) ────────────────────
+
+async function getProspectPipeline() {
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+    const thisMonth = new Date().toISOString().slice(0, 7);
+
+    const [week, month] = await Promise.all([
+      atFetch(PROR_DB, 'OutreachCosts', {
+        filter: `IS_AFTER({Date}, "${sevenDaysAgo}")`,
+      }),
+      atFetch(PROR_DB, 'OutreachCosts', {
+        filter: `DATETIME_FORMAT({Date}, 'YYYY-MM') = "${thisMonth}"`,
+      }),
+    ]);
+
+    const weekRecords = week.records || [];
+    const monthRecords = month.records || [];
+
+    const newProspects7d = weekRecords.reduce((s, r) => s + (r.fields?.NewProspects || 0), 0);
+    const newProspectsMonth = monthRecords.reduce((s, r) => s + (r.fields?.NewProspects || 0), 0);
+
+    // Per-client breakdown
+    const byClient = {};
+    for (const r of weekRecords) {
+      const client = r.fields?.Client || 'Unknown';
+      byClient[client] = (byClient[client] || 0) + (r.fields?.NewProspects || 0);
+    }
+
+    return { newProspects7d, newProspectsMonth, dailyAvg: Math.round(newProspects7d / 7), byClient };
+  } catch (err) {
+    console.error('[daily-digest] getProspectPipeline error:', err.message);
+    return { newProspects7d: 0, newProspectsMonth: 0, dailyAvg: 0, byClient: {} };
+  }
+}
+
 // ── AI-generated action items ───────────────────────────────────────────────
 
 async function generateActionItems(clients, inbox) {
@@ -216,7 +252,7 @@ Respond with ONLY a JSON array of strings, e.g.:
 
 // ── Build the digest message (matches original format) ──────────────────────
 
-function buildDigest(date, inbox, clients, activity, actionItems, weekendRecap, yesterday) {
+function buildDigest(date, inbox, clients, activity, actionItems, weekendRecap, yesterday, pipeline) {
   const days = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
   const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
   const d = new Date(date);
@@ -286,6 +322,18 @@ function buildDigest(date, inbox, clients, activity, actionItems, weekendRecap, 
     lines.push('');
   }
 
+  // Prospect pipeline
+  if (pipeline && (pipeline.newProspects7d > 0 || pipeline.newProspectsMonth > 0)) {
+    lines.push(`🎯 *Prospect Pipeline*`);
+    lines.push(`  • New sites added (7d): ${pipeline.newProspects7d} | ~${pipeline.dailyAvg}/day`);
+    lines.push(`  • New sites this month: ${pipeline.newProspectsMonth}`);
+    const entries = Object.entries(pipeline.byClient || {}).filter(([, v]) => v > 0);
+    if (entries.length > 0) {
+      lines.push(`  • Per client: ${entries.map(([k, v]) => `${k}: +${v}`).join(', ')}`);
+    }
+    lines.push('');
+  }
+
   // Bot activity
   lines.push(`📊 *Bot Activity*`);
   lines.push(`  • ${activity.totalOutreach.toLocaleString()} total domains in outreach database`);
@@ -313,19 +361,20 @@ async function execute(args = {}) {
 
   try {
     // Run all data fetches in parallel
-    const [inbox, clients, activity, weekendRecap, yesterday] = await Promise.all([
+    const [inbox, clients, activity, weekendRecap, yesterday, pipeline] = await Promise.all([
       getInboxOpportunities(),
       getClientProgress(),
       getBotActivity(),
       getWeekendRecap(),
       getYesterdayActivity(),
+      getProspectPipeline(),
     ]);
 
     // Generate AI action items (needs inbox + client data)
     const actionItems = await generateActionItems(clients, inbox);
 
     // Build and send
-    const message = buildDigest(new Date(), inbox, clients, activity, actionItems, weekendRecap, yesterday);
+    const message = buildDigest(new Date(), inbox, clients, activity, actionItems, weekendRecap, yesterday, pipeline);
     await slack.post(targetChannel, message);
 
   } catch (err) {
