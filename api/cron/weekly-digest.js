@@ -284,7 +284,7 @@ async function getProspectInventory() {
   let hasMore = true;
 
   while (hasMore) {
-    const data = await brevoGet(`/emailCampaigns?type=classic&status=scheduled&limit=${limit}&offset=${offset}&sort=desc`);
+    const data = await brevoGet(`/emailCampaigns?type=classic&status=queued&limit=${limit}&offset=${offset}&sort=desc`);
     const campaigns = data.campaigns || [];
     scheduledCampaigns.push(...campaigns);
     hasMore = campaigns.length === limit;

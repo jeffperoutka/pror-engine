@@ -6,8 +6,12 @@ const Airtable = require('airtable');
 let _base;
 function getBase() {
   if (!_base) {
-    Airtable.configure({ apiKey: process.env.AIRTABLE_API_KEY });
-    _base = Airtable.base(process.env.AIRTABLE_BASE_ID);
+    const key = process.env.AIRTABLE_API_KEY || process.env.AIRTABLE_PAT;
+    const baseId = (process.env.AIRTABLE_BASE_ID || process.env.AIRTABLE_BASE || '').trim();
+    if (!key) throw new Error('[airtable] No AIRTABLE_API_KEY or AIRTABLE_PAT set');
+    if (!baseId) throw new Error('[airtable] No AIRTABLE_BASE_ID or AIRTABLE_BASE set');
+    Airtable.configure({ apiKey: key });
+    _base = Airtable.base(baseId);
   }
   return _base;
 }

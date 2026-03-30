@@ -128,10 +128,10 @@ async function cleanCampaignLists(emails) {
 
   try {
     // Get all scheduled/draft campaigns
-    const campaignsData = await brevoFetch('/emailCampaigns?status=queued&limit=500&offset=0');
+    const campaignsData = await brevoFetch('/emailCampaigns?status=queued&limit=100&offset=0');
     const queued = campaignsData.campaigns || [];
 
-    const draftsData = await brevoFetch('/emailCampaigns?status=draft&limit=500&offset=0');
+    const draftsData = await brevoFetch('/emailCampaigns?status=draft&limit=100&offset=0');
     const drafts = draftsData.campaigns || [];
 
     const pendingCampaigns = [...queued, ...drafts];
@@ -261,7 +261,7 @@ async function quarantineDomainContacts(domains) {
       // so we blacklist the domain contacts we know about from the bounce events.
       // The contacts are already being blacklisted individually in step 2.
       // Here we additionally flag them on the quarantine list for visibility.
-      const searchResult = await brevoFetch(`/contacts?limit=500&offset=0&modifiedSince=${yesterday()}`);
+      const searchResult = await brevoFetch(`/contacts?limit=100&offset=0&modifiedSince=${yesterday()}`);
       const contacts = (searchResult.contacts || []).filter(
         (c) => domainOf(c.email) === domain
       );

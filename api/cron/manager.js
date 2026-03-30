@@ -253,7 +253,7 @@ async function checkPipelineIntegrity() {
   // 2a. Prospect inventory per client — check queued Brevo campaigns per client
   let queuedCampaigns = [];
   try {
-    const data = await brevoFetch('/emailCampaigns?status=queued&limit=200&offset=0');
+    const data = await brevoFetch('/emailCampaigns?status=queued&limit=100&offset=0');
     queuedCampaigns = data.campaigns || [];
     console.log(`[manager] Brevo queued campaigns: ${queuedCampaigns.length}`);
   } catch (err) {
@@ -710,7 +710,7 @@ async function executeAutoFixes(pipelineAlerts, anomalies) {
       // Pause scheduled campaigns for this client's sender domains
       let pausedCount = 0;
       try {
-        const queuedData = await brevoFetch('/emailCampaigns?status=queued&limit=200&offset=0');
+        const queuedData = await brevoFetch('/emailCampaigns?status=queued&limit=100&offset=0');
         const queued = queuedData.campaigns || [];
 
         for (const campaign of queued) {
@@ -759,7 +759,7 @@ async function executeAutoFixes(pipelineAlerts, anomalies) {
     if (client) {
       let pausedCount = 0;
       try {
-        const queuedData = await brevoFetch('/emailCampaigns?status=queued&limit=200&offset=0');
+        const queuedData = await brevoFetch('/emailCampaigns?status=queued&limit=100&offset=0');
         const queued = queuedData.campaigns || [];
 
         for (const campaign of queued) {
@@ -806,7 +806,7 @@ async function executeAutoFixes(pipelineAlerts, anomalies) {
   for (const alert of unauthDomains) {
     let pausedCount = 0;
     try {
-      const queuedData = await brevoFetch('/emailCampaigns?status=queued&limit=200&offset=0');
+      const queuedData = await brevoFetch('/emailCampaigns?status=queued&limit=100&offset=0');
       const queued = queuedData.campaigns || [];
 
       for (const campaign of queued) {

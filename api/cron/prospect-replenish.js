@@ -211,7 +211,7 @@ async function countUnsentProspects(clientSlug) {
   const limit = 50;
 
   while (true) {
-    const data = await brevoFetch(`/emailCampaigns?type=classic&status=scheduled&limit=${limit}&offset=${offset}&sort=desc`);
+    const data = await brevoFetch(`/emailCampaigns?type=classic&status=queued&limit=${limit}&offset=${offset}&sort=desc`);
     if (!data.campaigns || data.campaigns.length === 0) break;
 
     for (const c of data.campaigns) {
