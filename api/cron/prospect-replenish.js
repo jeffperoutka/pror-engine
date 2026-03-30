@@ -8,6 +8,7 @@
  */
 const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
+const discord = require('../../shared/discord');
 
 // ─── Environment ───────────────────────────────────────────────────────────────
 const BREVO_KEY = process.env.BREVO_API_KEY;
@@ -742,12 +743,13 @@ async function runReplenishment() {
 
   console.log('\n' + summary);
 
-  // Step 4: Post to Slack
+  // Step 4: Post to Slack + Discord
   try {
     await slack.post(CHANNEL(), summary);
   } catch (err) {
     console.error(`Slack post failed: ${err.message}`);
   }
+  await discord.postIfConfigured('command', summary);
 
   return { results, deferred, totalNewProspects, totalCost };
 }

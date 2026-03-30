@@ -1,5 +1,6 @@
 const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
+const discord = require('../../shared/discord');
 
 const BREVO_KEY = process.env.BREVO_API_KEY;
 const CHANNEL = () => process.env.CHANNEL_COMMAND_CENTER;
@@ -313,13 +314,14 @@ async function run() {
     });
   }
 
-  // Post to Slack
+  // Post to Slack + Discord
   const alertPrefix = hasCritical ? '<!channel> ' : '';
   await slack.postBlocks(
     CHANNEL(),
     blocks,
     `${alertPrefix}Sender Health Report \u2014 ${today}`
   );
+  await discord.postIfConfigured('command', `${alertPrefix}Sender Health Report \u2014 ${today}`, blocks);
 
   // Log to Airtable
   try {

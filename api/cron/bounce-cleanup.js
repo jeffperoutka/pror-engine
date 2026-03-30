@@ -1,5 +1,6 @@
 const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
+const discord = require('../../shared/discord');
 const { brevoFetch } = require('../../shared/brevo');
 
 const CHANNEL = () => process.env.CHANNEL_COMMAND_CENTER;
@@ -327,7 +328,8 @@ async function postReport(stats) {
   }
 
   await slack.post(CHANNEL(), msg);
-  console.log(`[bounce-cleanup] Slack report posted`);
+  await discord.postIfConfigured('command', msg);
+  console.log(`[bounce-cleanup] Report posted`);
 }
 
 // ---------------------------------------------------------------------------
@@ -392,15 +394,14 @@ async function run() {
   } catch (err) {
     console.error('[bounce-cleanup] Fatal error:', err);
 
-    // Still try to notify Slack
+    // Still try to notify Slack + Discord
+    const errorMsg = `:rotating_light: *Bounce Cleanup Failed*\n\n\`\`\`${err.message}\`\`\`\n\nCheck Vercel logs for details.`;
     try {
-      await slack.post(
-        CHANNEL(),
-        `:rotating_light: *Bounce Cleanup Failed*\n\n\`\`\`${err.message}\`\`\`\n\nCheck Vercel logs for details.`
-      );
+      await slack.post(CHANNEL(), errorMsg);
     } catch (slackErr) {
       console.error('[bounce-cleanup] Could not post error to Slack:', slackErr.message);
     }
+    await discord.postIfConfigured('command', errorMsg);
 
     throw err;
   }

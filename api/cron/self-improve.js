@@ -18,6 +18,7 @@
 
 const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
+const discord = require('../../shared/discord');
 const ai = require('../../shared/ai');
 const airtable = require('../../shared/airtable');
 const brevo = require('../../shared/brevo');
@@ -976,10 +977,9 @@ async function run() {
   const channel = CHANNEL();
   if (channel) {
     await slack.post(channel, report);
-    console.log('[self-improve] Report posted to Slack');
-  } else {
-    console.error('[self-improve] CHANNEL_COMMAND_CENTER not set — report not posted');
   }
+  await discord.postIfConfigured('command', report);
+  console.log('[self-improve] Report posted');
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
   console.log(`[self-improve] Done in ${elapsed}s`);

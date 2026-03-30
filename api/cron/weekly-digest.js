@@ -13,6 +13,7 @@
  */
 const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
+const discord = require('../../shared/discord');
 const airtable = require('../../shared/airtable');
 
 const BREVO_KEY = process.env.BREVO_API_KEY;
@@ -641,14 +642,12 @@ async function run() {
     }],
   });
 
-  // Post to Slack
-  await slack.postBlocks(
-    CHANNEL(),
-    blocks,
-    `📊 PROR Weekly Digest — Week of ${weekOf}`
-  );
+  // Post to Slack + Discord
+  const digestTitle = `📊 PROR Weekly Digest — Week of ${weekOf}`;
+  await slack.postBlocks(CHANNEL(), blocks, digestTitle);
+  await discord.postIfConfigured('command', digestTitle, blocks);
 
-  console.error(`[weekly-digest] Posted to Slack. Totals: sent=${totals.sent}, opens=${totals.opens}, replies=${totals.replies}, links=${thisWeekLinks.length}`);
+  console.error(`[weekly-digest] Report posted. Totals: sent=${totals.sent}, opens=${totals.opens}, replies=${totals.replies}, links=${thisWeekLinks.length}`);
 
   return {
     weekOf,

@@ -16,6 +16,7 @@
 
 const { waitUntil } = require('@vercel/functions');
 const slack = require('../../shared/slack');
+const discord = require('../../shared/discord');
 const { brevoFetch } = require('../../shared/brevo');
 
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
@@ -1101,7 +1102,8 @@ async function postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, 
   }
 
   await slack.post(CHANNEL(), msg);
-  console.log('[manager] Slack report posted');
+  await discord.postIfConfigured('command', msg);
+  console.log('[manager] Report posted');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1302,15 +1304,14 @@ async function run() {
   } catch (err) {
     console.error('[manager] Fatal error:', err);
 
-    // Still try to notify Slack
+    // Still try to notify Slack + Discord
+    const errorMsg = `\ud83d\udea8 *Manager Agent Failed*\n\n\`\`\`${err.message}\`\`\`\n\nCheck Vercel logs for details.`;
     try {
-      await slack.post(
-        CHANNEL(),
-        `\ud83d\udea8 *Manager Agent Failed*\n\n\`\`\`${err.message}\`\`\`\n\nCheck Vercel logs for details.`
-      );
+      await slack.post(CHANNEL(), errorMsg);
     } catch (slackErr) {
       console.error('[manager] Could not post error to Slack:', slackErr.message);
     }
+    await discord.postIfConfigured('command', errorMsg);
 
     throw err;
   }

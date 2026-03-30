@@ -19,6 +19,7 @@ const { waitUntil } = require('@vercel/functions');
 const gmail = require('../../shared/gmail');
 const ai = require('../../shared/ai');
 const slack = require('../../shared/slack');
+const discord = require('../../shared/discord');
 const airtable = require('../../shared/airtable');
 const brevo = require('../../shared/brevo');
 
@@ -679,9 +680,11 @@ async function processInbox() {
           await addToSpamBlacklist(senderDomain, c.summary);
         }
         await gmail.archiveMessage(id);
-        await slack.post(linksChannel, `:wastebasket: *SPAM auto-archived:* ${escapeSlackMrkdwn(email.from)} — _${escapeSlackMrkdwn(c.summary)}_`).catch((e) => {
+        const spamMsg = `:wastebasket: *SPAM auto-archived:* ${escapeSlackMrkdwn(email.from)} — _${escapeSlackMrkdwn(c.summary)}_`;
+        await slack.post(linksChannel, spamMsg).catch((e) => {
           console.error(`[SPAM] SlackErr=${e.data?.error || e.message?.slice(0, 40)}`);
         });
+        await discord.postIfConfigured('links', spamMsg);
         results.push({ id, from: email.from, type: 'spam', action: 'archived_blacklisted' });
         await gmail.markAsRead(id).catch(() => {});
         continue;
@@ -764,6 +767,7 @@ async function processInbox() {
         await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
           console.error(`[LEXCH] SlackErr=${e.data?.error || e.message?.slice(0, 40)}`);
         });
+        await discord.postIfConfigured('links', fallbackText, blocks);
         await gmail.markAsRead(id).catch(() => {});
         results.push({ id, from: email.from, type: 'link_exchange', action: autoReplySent ? 'auto_replied' : 'posted' });
         continue;
@@ -862,6 +866,7 @@ async function processInbox() {
       await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
         console.error(`[POST] SlackErr=${e.data?.error || e.message?.slice(0, 40)}`);
       });
+      await discord.postIfConfigured('links', fallbackText, blocks);
 
       await gmail.markAsRead(id).catch(() => {});
 
@@ -904,7 +909,9 @@ async function replayInbox(hours = 24) {
 
   if (msgList.length === 0) {
     // Post diagnostic to Slack
-    await slack.post(linksChannel, `:mag: *Replay: 0 messages found* in last ${hours}h.\nQuery: \`${query}\`\nThis could mean no replies came in, or there's a forwarding issue.`).catch(() => {});
+    const noMsgText = `:mag: *Replay: 0 messages found* in last ${hours}h.\nQuery: \`${query}\`\nThis could mean no replies came in, or there's a forwarding issue.`;
+    await slack.post(linksChannel, noMsgText).catch(() => {});
+    await discord.postIfConfigured('links', noMsgText);
     return { processed: 0, message: 'No messages found in replay window' };
   }
 
@@ -1003,10 +1010,10 @@ async function replayInbox(hours = 24) {
         threadMessages,
       });
       await slack.postBlocks(linksChannel, blocks, fallbackText).catch((e) => {
-        // Compact log — Vercel truncates to ~30 chars
         const errCode = e.data?.error || e.code || e.message?.slice(0, 40);
         console.error(`[REPLAY] SlackErr=${errCode}`);
       });
+      await discord.postIfConfigured('links', fallbackText, blocks);
 
       results.push({ id, from: email.from, type: c.type, action: 'replayed' });
     } catch (err) {
@@ -1015,7 +1022,9 @@ async function replayInbox(hours = 24) {
     }
   }
 
-  await slack.post(linksChannel, `:arrows_counterclockwise: *Replay complete:* ${results.filter(r => r.action === 'replayed').length} messages posted for review`).catch(() => {});
+  const replayMsg = `:arrows_counterclockwise: *Replay complete:* ${results.filter(r => r.action === 'replayed').length} messages posted for review`;
+  await slack.post(linksChannel, replayMsg).catch(() => {});
+  await discord.postIfConfigured('links', replayMsg);
   return { processed: results.length, results };
 }
 

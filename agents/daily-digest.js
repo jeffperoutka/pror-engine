@@ -11,6 +11,7 @@
  */
 const Airtable = require('airtable');
 const slack = require('../shared/slack');
+const discord = require('../shared/discord');
 const gmail = require('../shared/gmail');
 const ai = require('../shared/ai');
 
@@ -376,10 +377,12 @@ async function execute(args = {}) {
     // Build and send
     const message = buildDigest(new Date(), inbox, clients, activity, actionItems, weekendRecap, yesterday, pipeline);
     await slack.post(targetChannel, message);
+    await discord.postIfConfigured('command', message);
 
   } catch (err) {
     console.error('Digest error:', err);
     await slack.post(targetChannel || process.env.CHANNEL_COMMAND_CENTER, `❌ Daily digest error: ${err.message}`);
+    await discord.postIfConfigured('command', `❌ Daily digest error: ${err.message}`);
   }
 }
 
