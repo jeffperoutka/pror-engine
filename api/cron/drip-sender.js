@@ -52,22 +52,17 @@ async function atFetch(endpoint, method = 'GET', body = null) {
  * Get all DripQueue records that are due for sending today
  */
 async function getDueRecords() {
-  const today = new Date().toISOString().split('T')[0];
-  console.log(`[drip-sender] getDueRecords — today=${today}, base=${AIRTABLE_BASE}, pat=${AIRTABLE_PAT ? AIRTABLE_PAT.substring(0, 10) + '...' : 'MISSING'}`);
   const records = [];
   let offset = null;
 
   do {
     const params = new URLSearchParams({
-      filterByFormula: `AND({Status}="active", {NextSendDate}<="${today}")`,
+      filterByFormula: `AND({Status}="active", IS_BEFORE({NextSendDate}, DATEADD(TODAY(), 1, 'days')))`,
       pageSize: '100',
     });
     if (offset) params.set('offset', offset);
 
-    const url = `/DripQueue?${params}`;
-    console.log(`[drip-sender] Fetching: ${url.substring(0, 120)}`);
-    const data = await atFetch(url);
-    console.log(`[drip-sender] Got ${(data.records || []).length} records, offset=${data.offset || 'none'}`);
+    const data = await atFetch(`/DripQueue?${params}`);
     records.push(...(data.records || []));
     offset = data.offset || null;
     if (offset) await sleep(200);
@@ -133,17 +128,11 @@ async function runDripSender() {
   console.log(`[drip-sender] Starting — ${today}`);
 
   // 1. Get all due records
-  let dueRecords;
-  try {
-    dueRecords = await getDueRecords();
-  } catch (err) {
-    console.error(`[drip-sender] getDueRecords FAILED: ${err.message}`);
-    return { sent: 0, errors: 0, skipped: 0, debug: { error: err.message, today, base: AIRTABLE_BASE, pat: AIRTABLE_PAT ? AIRTABLE_PAT.substring(0, 10) + '...' : 'MISSING' } };
-  }
+  const dueRecords = await getDueRecords();
   console.log(`[drip-sender] ${dueRecords.length} records due for sending`);
 
   if (dueRecords.length === 0) {
-    return { sent: 0, errors: 0, skipped: 0, debug: { today, base: AIRTABLE_BASE, pat: AIRTABLE_PAT ? AIRTABLE_PAT.substring(0, 10) + '...' : 'MISSING' } };
+    return { sent: 0, errors: 0, skipped: 0 };
   }
 
   // 2. Group by client
@@ -230,8 +219,8 @@ async function runDripSender() {
         updates.push({ id: rec.id, fields: nextFields });
         clientSent++;
 
-        // Rate limit: ~2 emails/sec to stay under Brevo limits
-        await sleep(500);
+        // Rate limit: ~3 emails/sec to stay under Brevo limits
+        await sleep(300);
       } catch (err) {
         console.error(`[drip-sender] Error sending to ${rec.Email}: ${err.message}`);
         clientErrors++;
