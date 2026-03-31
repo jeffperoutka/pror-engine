@@ -19,11 +19,10 @@ const AIRTABLE_BASE = (process.env.AIRTABLE_BASE || process.env.AIRTABLE_BASE_ID
 const CHANNEL = () => process.env.CHANNEL_COMMAND_CENTER;
 
 const TIMEOUT_SAFETY_MS = 200_000; // Stop processing new clients after 200s (sync handler, 300s limit)
-const MAX_CLIENTS_PER_RUN = 3;     // Process max 3 clients per run to stay within 300s
+const MAX_CLIENTS_PER_RUN = 2;     // Process max 2 clients per run to stay within 300s
 const REPLENISH_THRESHOLD = 150;   // Trigger replenish if < 150 unsent prospects remain
 const SUFFIXES = [
-  'write for us', 'guest post', 'submit article', 'contribute',
-  'sponsored post', 'advertise with us', 'content partnership',
+  'write for us', 'guest post', 'submit article', 'sponsored post',
 ];
 
 // ─── Client Configs ────────────────────────────────────────────────────────────
@@ -300,11 +299,47 @@ async function getExistingEmails() {
       }
       offset += limit;
       if (offset >= (data.count || 0)) break;
-      await sleep(300);
+      await sleep(200);
     } catch { break; }
   }
   _globalEmailCache = emails;
   return emails;
+}
+
+/**
+ * Fetch existing DripQueue domains to prevent duplicate outreach.
+ * Returns a Set of domains already queued (any status).
+ */
+let _dripQueueDomainCache = null;
+async function getDripQueueDomains() {
+  if (_dripQueueDomainCache) return _dripQueueDomainCache;
+  const domains = new Set();
+  if (!AIRTABLE_PAT || !AIRTABLE_BASE) return domains;
+
+  try {
+    const params = new URLSearchParams({
+      pageSize: '100',
+      'fields[]': 'Domain',
+    });
+    let offset = null;
+    do {
+      if (offset) params.set('offset', offset);
+      const res = await fetch(`https://api.airtable.com/v0/${AIRTABLE_BASE}/DripQueue?${params}`, {
+        headers: { 'Authorization': `Bearer ${AIRTABLE_PAT}` },
+      });
+      const data = await res.json();
+      for (const r of (data.records || [])) {
+        const d = (r.fields?.Domain || '').toLowerCase().trim();
+        if (d) domains.add(d);
+      }
+      offset = data.offset || null;
+      if (offset) await sleep(200);
+    } while (offset);
+  } catch (err) {
+    console.error(`[prospect-replenish] getDripQueueDomains error: ${err.message}`);
+  }
+  _dripQueueDomainCache = domains;
+  return domains;
 }
 
 // ─── DataForSEO API ────────────────────────────────────────────────────────────
@@ -575,6 +610,7 @@ function isDomainBlocked(domain) {
 async function processClient(clientConfig, week, globalDedupeSet, preCountedRemaining) {
   const { slug, name, keywords } = clientConfig;
   const log = (msg) => console.log(`  [${slug}] ${msg}`);
+  const t0 = Date.now();
 
   // Use pre-counted remaining from parallel step (skip redundant Airtable call)
   const remaining = preCountedRemaining;
@@ -584,22 +620,30 @@ async function processClient(clientConfig, week, globalDedupeSet, preCountedRema
     return { slug, name, status: 'skipped', remaining, newProspects: 0, reason: `${remaining} remaining >= ${REPLENISH_THRESHOLD} threshold` };
   }
 
-  // Step 2: Get existing emails for global deduplication (all clients, all lists)
-  log('Loading existing emails for dedup...');
-  const existingEmails = await getExistingEmails();
+  // Step 2: Get existing emails + DripQueue domains for deduplication (parallel)
+  log('Loading dedup data (Brevo + DripQueue)...');
+  const [existingEmails, dripQueueDomains] = await Promise.all([
+    getExistingEmails(),
+    getDripQueueDomains(),
+  ]);
   const existingDomains = new Set();
   for (const email of existingEmails) {
     const domain = email.split('@')[1];
     if (domain) existingDomains.add(domain);
   }
-  log(`Found ${existingEmails.size} existing emails, ${existingDomains.size} domains to skip`);
+  // Merge DripQueue domains into existing
+  for (const d of dripQueueDomains) {
+    existingDomains.add(d);
+  }
+  log(`Dedup sources: ${existingEmails.size} Brevo emails, ${dripQueueDomains.size} DripQueue domains → ${existingDomains.size} total domains to skip (${Date.now() - t0}ms)`);
 
   // Step 3: SERP scraping
   const authToken = DATAFORSEO_AUTH();
   const serpQueryCount = Math.min(3, keywords.length) * SUFFIXES.length;
-  log(`Scraping SERPs (3 keywords x ${SUFFIXES.length} suffixes = ${serpQueryCount} queries, auth=${authToken.slice(0,8)}...)`);
+  log(`Scraping SERPs (3 keywords x ${SUFFIXES.length} suffixes = ${serpQueryCount} queries)`);
+  const t1 = Date.now();
   const serpResults = await scrapeSERPs(keywords);
-  log(`Got ${serpResults.length} raw SERP results`);
+  log(`Got ${serpResults.length} raw SERP results (${Date.now() - t1}ms)`);
 
   // Step 4: Dedupe domains (with debug counters)
   const uniqueDomains = new Map(); // domain -> { url, title }
@@ -615,7 +659,7 @@ async function processClient(clientConfig, week, globalDedupeSet, preCountedRema
       uniqueDomains.set(r.domain, { url: r.url, title: r.title });
     }
   }
-  log(`Dedup breakdown: ${serpResults.length} raw → ${dbgBlocked} blocked, ${dbgExisting} existing, ${dbgGlobal} global-dedup, ${dbgDupeInBatch} dupe-in-batch → ${uniqueDomains.size} new`);
+  log(`Dedup: ${serpResults.length} raw → ${dbgBlocked} blocked, ${dbgExisting} existing, ${dbgGlobal} xClient, ${dbgDupeInBatch} dupe → ${uniqueDomains.size} new`);
 
   // Add to global dedupe set
   for (const domain of uniqueDomains.keys()) {
@@ -631,8 +675,9 @@ async function processClient(clientConfig, week, globalDedupeSet, preCountedRema
   // Step 5: Email lookup
   const domainsToLookup = Array.from(uniqueDomains.keys());
   log(`Looking up emails for ${domainsToLookup.length} domains...`);
+  const t2 = Date.now();
   const emailResults = await lookupEmails(domainsToLookup);
-  log(`Found ${emailResults.length} emails`);
+  log(`Found ${emailResults.length} emails (${Date.now() - t2}ms)`);
 
   if (emailResults.length === 0) {
     return { slug, name, status: 'no_emails', remaining, newProspects: 0, serpQueries: serpQueryCount, emailLookups: domainsToLookup.length, reason: 'No emails found' };
@@ -654,8 +699,9 @@ async function processClient(clientConfig, week, globalDedupeSet, preCountedRema
 
   // Step 7: Queue to DripQueue for daily sending via transactional API
   log(`Queuing ${prospects.length} prospects to DripQueue...`);
+  const t3 = Date.now();
   const pushResult = await queueToDrip(slug, prospects, clientConfig);
-  log(`Queued ${pushResult.queued} prospects`);
+  log(`Queued ${pushResult.queued} prospects (${Date.now() - t3}ms, total ${Date.now() - t0}ms)`);
 
   // Step 8: Track costs in Airtable
   const serpCost = serpQueryCount * 0.01; // ~$0.01 per query
@@ -686,8 +732,9 @@ async function runReplenishment() {
   console.log(`=== Prospect Replenishment — ${dateStr} ===`);
   console.log(`Warming week: ${week} (new subdomain limit: ${WARMING_SCHEDULE[Math.min(week, 4)]}/day)`);
 
-  // Step 1: Check remaining prospects for all clients IN PARALLEL (was sequential, took ~40s)
-  console.log('\nChecking remaining prospects for all clients (parallel)...');
+  // Step 1: Check remaining prospects for all clients IN PARALLEL
+  const t0 = Date.now();
+  console.log('\nStep 1: Counting remaining prospects (parallel)...');
   const clientStatus = await Promise.all(
     CLIENT_CONFIGS.map(async (config) => {
       try {
@@ -703,7 +750,7 @@ async function runReplenishment() {
   // Sort by remaining (ascending) — most urgent first
   clientStatus.sort((a, b) => a.remaining - b.remaining);
 
-  console.log('Priority order:');
+  console.log(`Step 1 done (${Date.now() - t0}ms). Priority order:`);
   for (const { config, remaining } of clientStatus) {
     const urgent = remaining < REPLENISH_THRESHOLD ? '** NEEDS REPLENISH **' : 'OK';
     console.log(`  ${config.slug}: ${remaining} remaining — ${urgent}`);
@@ -733,7 +780,7 @@ async function runReplenishment() {
       continue;
     }
 
-    console.log(`\n--- Processing ${config.slug} (${remaining} remaining) [${processedCount + 1}/${MAX_CLIENTS_PER_RUN}] ---`);
+    console.log(`\n--- Processing ${config.slug} (${remaining} remaining) [${processedCount + 1}/${MAX_CLIENTS_PER_RUN}] at ${Date.now() - startTime}ms ---`);
     try {
       const result = await processClient(config, week, globalDedupeSet, remaining);
       results.push(result);
