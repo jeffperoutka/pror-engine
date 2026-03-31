@@ -364,62 +364,56 @@ const LOCATIONS = [
 ];
 
 async function scrapeSERPs(keywords) {
-  // Randomly select 3 keywords per run to stay within timeout (3 × 7 suffixes = 21 queries)
+  // Randomly select 3 keywords per run
   const shuffled = [...keywords].sort(() => Math.random() - 0.5);
   const selected = shuffled.slice(0, 3);
 
-  const queries = [];
+  // Build all tasks upfront — DataForSEO handles up to 100 per request
+  const tasks = [];
   for (const kw of selected) {
     for (const suffix of SUFFIXES) {
-      // Rotate location per query for diversity
-      const loc = LOCATIONS[queries.length % LOCATIONS.length];
-      queries.push({ keyword: `${kw} ${suffix}`, location_code: loc.code, language_code: loc.lang });
+      const loc = LOCATIONS[tasks.length % LOCATIONS.length];
+      tasks.push({
+        keyword: `${kw} ${suffix}`,
+        location_code: loc.code,
+        language_code: loc.lang,
+        depth: 100,
+      });
     }
   }
 
+  console.log(`    [SERP] Sending ${tasks.length} queries in 1 batch`);
   const results = [];
-  const batchSize = 3;
 
-  for (let i = 0; i < queries.length; i += batchSize) {
-    const batch = queries.slice(i, i + batchSize);
-    const tasks = batch.map(q => ({
-      keyword: q.keyword,
-      location_code: q.location_code,
-      language_code: q.language_code,
-      depth: 100,
-    }));
+  try {
+    const res = await fetch('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Basic ${DATAFORSEO_AUTH()}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(tasks),
+    });
 
-    try {
-      const res = await fetch('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Basic ${DATAFORSEO_AUTH()}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(tasks),
-      });
+    const data = await res.json();
 
-      const data = await res.json();
-
-      if (data.tasks) {
-        for (const task of data.tasks) {
-          if (task.status_code !== 20000) {
-            console.error(`DataForSEO task error: ${task.status_code} ${task.status_message}`);
-            continue;
-          }
-          if (task.result) {
-            for (const resultSet of task.result) {
-              if (resultSet.items) {
-                for (const item of resultSet.items) {
-                  if (item.type === 'organic' && item.url) {
-                    const domain = extractDomain(item.url);
-                    if (domain) {
-                      results.push({
-                        domain,
-                        url: item.url,
-                        title: item.title || '',
-                      });
-                    }
+    if (data.tasks) {
+      let ok = 0, fail = 0;
+      for (const task of data.tasks) {
+        if (task.status_code !== 20000) {
+          fail++;
+          if (fail <= 3) console.error(`DataForSEO task error: ${task.status_code} ${task.status_message}`);
+          continue;
+        }
+        ok++;
+        if (task.result) {
+          for (const resultSet of task.result) {
+            if (resultSet.items) {
+              for (const item of resultSet.items) {
+                if (item.type === 'organic' && item.url) {
+                  const domain = extractDomain(item.url);
+                  if (domain) {
+                    results.push({ domain, url: item.url, title: item.title || '' });
                   }
                 }
               }
@@ -427,11 +421,10 @@ async function scrapeSERPs(keywords) {
           }
         }
       }
-    } catch (err) {
-      console.error(`DataForSEO batch error: ${err.message}`);
+      console.log(`    [SERP] ${ok} tasks OK, ${fail} failed, ${results.length} raw results`);
     }
-
-    if (i + batchSize < queries.length) await sleep(1000);
+  } catch (err) {
+    console.error(`DataForSEO batch error: ${err.message}`);
   }
 
   return results;
@@ -620,22 +613,12 @@ async function processClient(clientConfig, week, globalDedupeSet, preCountedRema
     return { slug, name, status: 'skipped', remaining, newProspects: 0, reason: `${remaining} remaining >= ${REPLENISH_THRESHOLD} threshold` };
   }
 
-  // Step 2: Get existing emails + DripQueue domains for deduplication (parallel)
-  log('Loading dedup data (Brevo + DripQueue)...');
-  const [existingEmails, dripQueueDomains] = await Promise.all([
-    getExistingEmails(),
-    getDripQueueDomains(),
-  ]);
-  const existingDomains = new Set();
-  for (const email of existingEmails) {
-    const domain = email.split('@')[1];
-    if (domain) existingDomains.add(domain);
-  }
-  // Merge DripQueue domains into existing
-  for (const d of dripQueueDomains) {
-    existingDomains.add(d);
-  }
-  log(`Dedup sources: ${existingEmails.size} Brevo emails, ${dripQueueDomains.size} DripQueue domains → ${existingDomains.size} total domains to skip (${Date.now() - t0}ms)`);
+  // Step 2: Get DripQueue domains for deduplication (fast — only checks our own queue)
+  // Skipping Brevo contacts fetch (6000+ records, ~30s) to stay within 300s timeout
+  log('Loading DripQueue domains for dedup...');
+  const dripQueueDomains = await getDripQueueDomains();
+  const existingDomains = new Set(dripQueueDomains);
+  log(`Dedup: ${dripQueueDomains.size} DripQueue domains to skip (${Date.now() - t0}ms)`);
 
   // Step 3: SERP scraping
   const authToken = DATAFORSEO_AUTH();
@@ -732,20 +715,26 @@ async function runReplenishment() {
   console.log(`=== Prospect Replenishment — ${dateStr} ===`);
   console.log(`Warming week: ${week} (new subdomain limit: ${WARMING_SCHEDULE[Math.min(week, 4)]}/day)`);
 
-  // Step 1: Check remaining prospects for all clients IN PARALLEL
+  // Step 1: Check remaining prospects — batch 4 at a time to respect Airtable 5/s rate limit
   const t0 = Date.now();
-  console.log('\nStep 1: Counting remaining prospects (parallel)...');
-  const clientStatus = await Promise.all(
-    CLIENT_CONFIGS.map(async (config) => {
-      try {
-        const remaining = await countUnsentProspects(config.slug);
-        return { config, remaining };
-      } catch (err) {
-        console.error(`Error checking ${config.slug}: ${err.message}`);
-        return { config, remaining: 999, error: err.message };
-      }
-    })
-  );
+  console.log('\nStep 1: Counting remaining prospects...');
+  const clientStatus = [];
+  for (let i = 0; i < CLIENT_CONFIGS.length; i += 4) {
+    const batch = CLIENT_CONFIGS.slice(i, i + 4);
+    const batchResults = await Promise.all(
+      batch.map(async (config) => {
+        try {
+          const remaining = await countUnsentProspects(config.slug);
+          return { config, remaining };
+        } catch (err) {
+          console.error(`Error checking ${config.slug}: ${err.message}`);
+          return { config, remaining: 999, error: err.message };
+        }
+      })
+    );
+    clientStatus.push(...batchResults);
+    if (i + 4 < CLIENT_CONFIGS.length) await sleep(250);
+  }
 
   // Sort by remaining (ascending) — most urgent first
   clientStatus.sort((a, b) => a.remaining - b.remaining);
