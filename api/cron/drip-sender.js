@@ -133,11 +133,17 @@ async function runDripSender() {
   console.log(`[drip-sender] Starting — ${today}`);
 
   // 1. Get all due records
-  const dueRecords = await getDueRecords();
+  let dueRecords;
+  try {
+    dueRecords = await getDueRecords();
+  } catch (err) {
+    console.error(`[drip-sender] getDueRecords FAILED: ${err.message}`);
+    return { sent: 0, errors: 0, skipped: 0, debug: { error: err.message, today, base: AIRTABLE_BASE, pat: AIRTABLE_PAT ? AIRTABLE_PAT.substring(0, 10) + '...' : 'MISSING' } };
+  }
   console.log(`[drip-sender] ${dueRecords.length} records due for sending`);
 
   if (dueRecords.length === 0) {
-    return { sent: 0, errors: 0, skipped: 0 };
+    return { sent: 0, errors: 0, skipped: 0, debug: { today, base: AIRTABLE_BASE, pat: AIRTABLE_PAT ? AIRTABLE_PAT.substring(0, 10) + '...' : 'MISSING' } };
   }
 
   // 2. Group by client
