@@ -796,8 +796,6 @@ module.exports = async function handler(req, res) {
     return res.status(200).json({ ok: true, ...result, timestamp: new Date().toISOString() });
   } catch (err) {
     console.error('Replenishment failed:', err);
-    });
-
     return res.status(500).json({ ok: false, error: err.message, timestamp: new Date().toISOString() });
   }
 };
