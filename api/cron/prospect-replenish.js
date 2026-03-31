@@ -315,11 +315,21 @@ const DATAFORSEO_AUTH = () => Buffer.from(`${DATAFORSEO_LOGIN}:${DATAFORSEO_PASS
  * Batches 3 requests at a time with 2s delays.
  * Returns array of { domain, url, title } objects.
  */
+// Search across multiple English-speaking countries for more diverse results
+const LOCATIONS = [
+  { code: 2840, lang: 'en' },  // US
+  { code: 2826, lang: 'en' },  // UK
+  { code: 2124, lang: 'en' },  // Canada
+  { code: 2036, lang: 'en' },  // Australia
+];
+
 async function scrapeSERPs(keywords) {
   const queries = [];
   for (const kw of keywords) {
     for (const suffix of SUFFIXES) {
-      queries.push(`${kw} ${suffix}`);
+      // Rotate location per query for diversity
+      const loc = LOCATIONS[queries.length % LOCATIONS.length];
+      queries.push({ keyword: `${kw} ${suffix}`, location_code: loc.code, language_code: loc.lang });
     }
   }
 
@@ -329,10 +339,10 @@ async function scrapeSERPs(keywords) {
   for (let i = 0; i < queries.length; i += batchSize) {
     const batch = queries.slice(i, i + batchSize);
     const tasks = batch.map(q => ({
-      keyword: q,
-      location_code: 2840,
-      language_code: 'en',
-      depth: 100,
+      keyword: q.keyword,
+      location_code: q.location_code,
+      language_code: q.language_code,
+      depth: 300,
     }));
 
     try {
