@@ -15,8 +15,8 @@ const BREVO_KEY = process.env.BREVO_API_KEY;
 const DATAFORSEO_LOGIN = process.env.DATAFORSEO_LOGIN;
 const DATAFORSEO_PASSWORD = process.env.DATAFORSEO_PASSWORD;
 const ANYMAILFINDER_KEY = process.env.ANYMAILFINDER_KEY;
-const AIRTABLE_PAT = process.env.AIRTABLE_PAT;
-const AIRTABLE_BASE = process.env.AIRTABLE_BASE;
+const AIRTABLE_PAT = (process.env.AIRTABLE_API_KEY || process.env.AIRTABLE_PAT || '').trim();
+const AIRTABLE_BASE = (process.env.AIRTABLE_BASE || process.env.AIRTABLE_BASE_ID || '').trim();
 const CHANNEL = () => process.env.CHANNEL_COMMAND_CENTER;
 
 const TIMEOUT_SAFETY_MS = 240_000; // Stop processing new clients after 240s
@@ -202,37 +202,37 @@ async function getBrevoListsByPrefix(prefix) {
 }
 
 /**
- * Count unsent prospects for a client by checking Brevo campaign status.
- * Looks for scheduled (not yet sent) campaigns with the client slug prefix.
- * Returns estimated unsent contact count.
+ * Count unsent prospects for a client from DripQueue Airtable table.
+ * Counts active records that haven't completed all 4 drip steps.
  */
 async function countUnsentProspects(clientSlug) {
-  let totalUnsent = 0;
-  let offset = 0;
-  const limit = 50;
+  if (!AIRTABLE_PAT || !AIRTABLE_BASE) return 0;
 
-  while (true) {
-    const data = await brevoFetch(`/emailCampaigns?type=classic&status=queued&limit=${limit}&offset=${offset}&sort=desc`);
-    if (!data.campaigns || data.campaigns.length === 0) break;
+  try {
+    const params = new URLSearchParams({
+      filterByFormula: `AND({ClientSlug}="${clientSlug}", {Status}="active")`,
+      pageSize: '100',
+      'fields[]': 'Email',
+    });
+    let total = 0;
+    let offset = null;
 
-    for (const c of data.campaigns) {
-      // Only count step-1 campaigns for this client (avoid counting follow-ups as separate prospects)
-      if (c.name.startsWith(clientSlug) && c.name.includes('-SEQ1-')) {
-        const recipients = c.recipients?.listIds || [];
-        for (const listId of recipients) {
-          try {
-            const listData = await brevoFetch(`/contacts/lists/${listId}`);
-            totalUnsent += listData.uniqueSubscribers || 0;
-          } catch { /* list may be deleted */ }
-        }
-      }
-    }
+    do {
+      if (offset) params.set('offset', offset);
+      const res = await fetch(`https://api.airtable.com/v0/${(AIRTABLE_BASE || '').trim()}/DripQueue?${params}`, {
+        headers: { 'Authorization': `Bearer ${AIRTABLE_PAT}` },
+      });
+      const data = await res.json();
+      total += (data.records || []).length;
+      offset = data.offset || null;
+      if (offset) await sleep(200);
+    } while (offset);
 
-    offset += limit;
-    if (offset >= (data.count || 0)) break;
+    return total;
+  } catch (err) {
+    console.error(`[prospect-replenish] countUnsentProspects error: ${err.message}`);
+    return 0;
   }
-
-  return totalUnsent;
 }
 
 async function createContactList(name) {
@@ -463,77 +463,67 @@ async function trackCostInAirtable(clientSlug, serpQueries, emailLookups, newPro
   }
 }
 
-// ─── Push to Brevo (Campaign Creation) ─────────────────────────────────────────
-async function pushToBrevoCampaigns(clientSlug, prospects, clientConfig, week) {
-  const template = TEMPLATES[clientSlug];
-  if (!template) throw new Error(`No template for ${clientSlug}`);
-
+// ─── Queue to Airtable DripQueue (replaces campaign creation) ────────────────
+async function queueToDrip(clientSlug, prospects, clientConfig) {
   const warmedLimit = 50;
-  const newLimit = WARMING_SCHEDULE[Math.min(week, 4)];
-  const dailyLimit = warmedLimit + newLimit;
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const nextSendDate = tomorrow.toISOString().split('T')[0];
+  const now = new Date().toISOString();
 
-  // Split prospects into daily batches
-  const batches = [];
-  for (let i = 0; i < prospects.length; i += dailyLimit) {
-    batches.push(prospects.slice(i, i + dailyLimit));
-  }
+  // Split into warmed vs new sender
+  const warmedProspects = prospects.slice(0, warmedLimit);
+  const newProspects = prospects.slice(warmedLimit);
 
-  const dateStr = new Date().toISOString().split('T')[0];
-  let campaignsCreated = 0;
+  const records = [];
 
-  for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
-    const batch = batches[batchIdx];
-    const batchDay = batchIdx;
-
-    const warmedBatch = batch.slice(0, warmedLimit);
-    const newBatch = batch.slice(warmedLimit, warmedLimit + newLimit);
-
-    for (const { sender, contacts: batchContacts, label } of [
-      { sender: clientConfig.senderWarmed, contacts: warmedBatch, label: 'W' },
-      { sender: clientConfig.senderNew, contacts: newBatch, label: 'N' },
-    ]) {
-      if (batchContacts.length === 0) continue;
-
-      const listName = `${clientSlug}-${label}-D${batchIdx + 1}-${dateStr}-replenish`;
-      const listId = await createContactList(listName);
-      await sleep(300);
-
-      const mappedContacts = batchContacts.map(p => ({
-        email: p.email,
-        firstName: p.firstName || 'there',
-        domain: p.domain,
-        siteName: domainToSiteName(p.domain),
-        articleTitle: p.title || '',
-        articleUrl: p.url || '',
-      }));
-
-      await importContacts(listId, mappedContacts);
-      await sleep(300);
-
-      // Create 4 drip campaigns for this batch
-      const baseDate = new Date();
-      baseDate.setDate(baseDate.getDate() + 1 + batchDay);
-
-      for (let step = 0; step < 4; step++) {
-        const ds = DRIP_STEPS[step];
-        const scheduledAt = new Date(baseDate);
-        scheduledAt.setDate(scheduledAt.getDate() + ds.delayDays);
-        scheduledAt.setHours(ds.hour, 0, 0, 0);
-
-        const campaignName = `${clientSlug}-${label}-D${batchIdx + 1}-SEQ${step + 1}-${dateStr}-replenish`;
-        const result = await createEmailCampaign(
-          campaignName, sender, listId,
-          template.subjects[step], template.bodies[step],
-          scheduledAt.toISOString(),
-        );
-
-        if (result.id) campaignsCreated++;
-        await sleep(400);
-      }
+  for (const { sender, contacts, senderType } of [
+    { sender: clientConfig.senderWarmed, contacts: warmedProspects, senderType: 'warmed' },
+    { sender: clientConfig.senderNew, contacts: newProspects, senderType: 'new' },
+  ]) {
+    for (const p of contacts) {
+      records.push({
+        fields: {
+          Email: p.email,
+          FirstName: p.firstName || 'there',
+          Domain: p.domain,
+          SiteName: domainToSiteName(p.domain),
+          ArticleTitle: p.title || '',
+          ArticleUrl: p.url || '',
+          ClientSlug: clientSlug,
+          DripStep: 0,
+          NextSendDate: nextSendDate,
+          SenderEmail: sender.email,
+          SenderId: sender.id,
+          SenderType: senderType,
+          Status: 'active',
+          CreatedAt: now,
+        },
+      });
     }
   }
 
-  return { batches: batches.length, campaignsCreated, dailyLimit };
+  // Airtable batch create: max 10 records per request
+  let created = 0;
+  for (let i = 0; i < records.length; i += 10) {
+    const batch = records.slice(i, i + 10);
+    try {
+      await fetch(`https://api.airtable.com/v0/${(AIRTABLE_BASE || '').trim()}/DripQueue`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${AIRTABLE_PAT}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ records: batch }),
+      });
+      created += batch.length;
+    } catch (err) {
+      console.error(`[prospect-replenish] DripQueue batch create error: ${err.message}`);
+    }
+    if (i + 10 < records.length) await sleep(200);
+  }
+
+  return { queued: created };
 }
 
 // ─── Blocked Domains (never outreach to these) ────────────────────────────────
@@ -631,10 +621,10 @@ async function processClient(clientConfig, week, globalDedupeSet) {
     };
   });
 
-  // Step 7: Push to Brevo
-  log(`Pushing ${prospects.length} prospects to Brevo...`);
-  const pushResult = await pushToBrevoCampaigns(slug, prospects, clientConfig, week);
-  log(`Created ${pushResult.campaignsCreated} campaigns across ${pushResult.batches} batches`);
+  // Step 7: Queue to DripQueue for daily sending via transactional API
+  log(`Queuing ${prospects.length} prospects to DripQueue...`);
+  const pushResult = await queueToDrip(slug, prospects, clientConfig);
+  log(`Queued ${pushResult.queued} prospects`);
 
   // Step 8: Track costs in Airtable
   const serpCost = serpQueryCount * 0.01; // ~$0.01 per query
@@ -650,7 +640,7 @@ async function processClient(clientConfig, week, globalDedupeSet) {
     newProspects: prospects.length,
     serpQueries: serpQueryCount,
     emailLookups: domainsToLookup.length,
-    campaignsCreated: pushResult.campaignsCreated,
+    queued: pushResult.queued,
     estimatedCost: totalCost,
   };
 }

@@ -46,7 +46,8 @@ const CLIENTS = [
 
 const CRON_SCHEDULE = {
   'gmail-poll':         { maxAgeMinutes: 10,   frequency: 'every 2 min' },
-  'sender-health':      { maxAgeMinutes: 1500, frequency: 'daily' },       // ~25 hours
+  'drip-sender':        { maxAgeMinutes: 1500, frequency: 'daily' },       // ~25 hours
+  'sender-health':      { maxAgeMinutes: 1500, frequency: 'daily' },
   'bounce-cleanup':     { maxAgeMinutes: 1500, frequency: 'daily' },
   'prospect-replenish': { maxAgeMinutes: 10500, frequency: 'weekly' },     // ~7.3 days
   'self-improve':       { maxAgeMinutes: 10500, frequency: 'weekly' },
@@ -251,34 +252,32 @@ async function checkPipelineIntegrity() {
   console.log('[manager] Checking pipeline integrity...');
   const alerts = [];
 
-  // 2a. Prospect inventory per client — check queued Brevo campaigns per client
-  let queuedCampaigns = [];
-  try {
-    const data = await brevoFetch('/emailCampaigns?status=queued&limit=100&offset=0');
-    queuedCampaigns = data.campaigns || [];
-    console.log(`[manager] Brevo queued campaigns: ${queuedCampaigns.length}`);
-  } catch (err) {
-    console.error('[manager] Failed to fetch queued campaigns:', err.message);
-    alerts.push({
-      level: 'critical',
-      client: 'SYSTEM',
-      message: `Brevo API error: ${err.message?.slice(0, 100)}`,
-    });
-  }
-
+  // 2a. Prospect inventory per client — check DripQueue in Airtable
   const queuedByClient = {};
   for (const client of CLIENTS) {
     queuedByClient[client.slug] = 0;
   }
-  for (const c of queuedCampaigns) {
-    const senderEmail = c.sender?.email || '';
-    const senderDomain = senderEmail.split('@')[1]?.toLowerCase() || '';
-    for (const client of CLIENTS) {
-      if (client.senderDomains.some(d => senderDomain === d || senderDomain.endsWith('.' + d))) {
-        queuedByClient[client.slug]++;
-        break;
+
+  try {
+    const dripRecords = await airtableSelect('DripQueue', {
+      filterByFormula: '{Status} = "active"',
+      fields: ['ClientSlug'],
+    });
+    for (const r of dripRecords) {
+      const slug = r.ClientSlug;
+      if (slug && queuedByClient.hasOwnProperty(slug)) {
+        queuedByClient[slug]++;
       }
     }
+    const totalQueued = dripRecords.length;
+    console.log(`[manager] DripQueue active records: ${totalQueued}`);
+  } catch (err) {
+    console.error('[manager] Failed to read DripQueue:', err.message);
+    alerts.push({
+      level: 'critical',
+      client: 'SYSTEM',
+      message: `DripQueue read error: ${err.message?.slice(0, 100)}`,
+    });
   }
 
   for (const client of CLIENTS) {
@@ -287,17 +286,17 @@ async function checkPipelineIntegrity() {
       alerts.push({
         level: 'warning',
         client: client.name,
-        message: `0 queued campaigns — no scheduled emails pending`,
+        message: `0 prospects in drip queue — no emails pending`,
         autoFixable: 'replenish',
       });
     } else {
-      // Each campaign typically sends ~55 emails, so queued campaigns ≈ days of inventory
-      const approxDays = queued; // ~1 campaign per day per client
+      // ~55 prospects per day per client, so queued/55 ≈ days of inventory
+      const approxDays = Math.ceil(queued / THRESHOLDS.dailySendRate);
       if (approxDays < THRESHOLDS.prospectMinDays) {
         alerts.push({
           level: 'warning',
           client: client.name,
-          message: `${queued} queued campaigns (< ${THRESHOLDS.prospectMinDays} days of inventory)`,
+          message: `${queued} prospects in queue (~${approxDays} days of inventory)`,
           autoFixable: 'replenish',
         });
       }
