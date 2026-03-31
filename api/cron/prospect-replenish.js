@@ -329,8 +329,12 @@ const LOCATIONS = [
 ];
 
 async function scrapeSERPs(keywords) {
+  // Randomly select 5 keywords per run to stay within timeout (5 × 7 suffixes = 35 queries)
+  const shuffled = [...keywords].sort(() => Math.random() - 0.5);
+  const selected = shuffled.slice(0, 5);
+
   const queries = [];
-  for (const kw of keywords) {
+  for (const kw of selected) {
     for (const suffix of SUFFIXES) {
       // Rotate location per query for diversity
       const loc = LOCATIONS[queries.length % LOCATIONS.length];
@@ -392,7 +396,7 @@ async function scrapeSERPs(keywords) {
       console.error(`DataForSEO batch error: ${err.message}`);
     }
 
-    if (i + batchSize < queries.length) await sleep(2000);
+    if (i + batchSize < queries.length) await sleep(1000);
   }
 
   return results;
