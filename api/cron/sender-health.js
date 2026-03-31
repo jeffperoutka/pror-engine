@@ -326,8 +326,8 @@ async function run() {
   // Log to Airtable
   try {
     const Airtable = require('airtable');
-    const base = new Airtable({ apiKey: process.env.AIRTABLE_PAT }).base(
-      (process.env.AIRTABLE_BASE || '').trim()
+    const base = new Airtable({ apiKey: (process.env.AIRTABLE_API_KEY || process.env.AIRTABLE_PAT || '').trim() }).base(
+      (process.env.AIRTABLE_BASE || process.env.AIRTABLE_BASE_ID || '').trim()
     );
 
     for (const stats of active) {

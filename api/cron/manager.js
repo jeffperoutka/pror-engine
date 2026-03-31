@@ -20,8 +20,8 @@ const discord = require('../../shared/discord');
 const { brevoFetch } = require('../../shared/brevo');
 
 const ANTHROPIC_KEY = process.env.ANTHROPIC_API_KEY;
-const AIRTABLE_PAT = process.env.AIRTABLE_PAT;
-const AIRTABLE_BASE = process.env.AIRTABLE_BASE;
+const AIRTABLE_PAT = (process.env.AIRTABLE_API_KEY || process.env.AIRTABLE_PAT || '').trim();
+const AIRTABLE_BASE = (process.env.AIRTABLE_BASE || process.env.AIRTABLE_BASE_ID || '').trim();
 const CHANNEL = () => process.env.CHANNEL_COMMAND_CENTER;
 
 // ── Client Configuration ────────────────────────────────────────────────────
