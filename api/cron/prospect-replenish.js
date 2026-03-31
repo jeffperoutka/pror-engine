@@ -12,8 +12,8 @@ const discord = require('../../shared/discord');
 
 // ─── Environment ───────────────────────────────────────────────────────────────
 const BREVO_KEY = process.env.BREVO_API_KEY;
-const DATAFORSEO_LOGIN = process.env.DATAFORSEO_LOGIN;
-const DATAFORSEO_PASSWORD = process.env.DATAFORSEO_PASSWORD;
+const DATAFORSEO_LOGIN = (process.env.DATAFORSEO_LOGIN || '').trim();
+const DATAFORSEO_PASSWORD = (process.env.DATAFORSEO_PASSWORD || '').trim();
 const ANYMAILFINDER_KEY = process.env.ANYMAILFINDER_KEY;
 const AIRTABLE_PAT = (process.env.AIRTABLE_API_KEY || process.env.AIRTABLE_PAT || '').trim();
 const AIRTABLE_BASE = (process.env.AIRTABLE_BASE || process.env.AIRTABLE_BASE_ID || '').trim();
