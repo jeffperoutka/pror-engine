@@ -21,7 +21,12 @@ const CHANNEL = () => process.env.CHANNEL_COMMAND_CENTER;
 
 const TIMEOUT_SAFETY_MS = 240_000; // Stop processing new clients after 240s
 const REPLENISH_THRESHOLD = 150;   // Trigger replenish if < 150 unsent prospects remain
-const SUFFIXES = ['write for us', 'guest post', 'submit article', 'contribute', 'guest author'];
+const SUFFIXES = [
+  'write for us', 'guest post', 'submit article', 'contribute', 'guest author',
+  'become a contributor', 'editorial guidelines', 'submit content', 'sponsored post',
+  'advertise with us', 'media kit', 'content partnership', 'submit a guest post',
+  'accepting guest posts', 'contributor guidelines',
+];
 
 // ─── Client Configs ────────────────────────────────────────────────────────────
 const CLIENT_CONFIGS = [
