@@ -788,14 +788,46 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // Run synchronously so results appear in HTTP response and Vercel logs
-  try {
-    const result = await runReplenishment();
-    const { logCronRun } = require('../../shared/airtable');
-    await logCronRun('prospect-replenish').catch(e => console.error('[prospect-replenish] logCronRun:', e.message));
-    return res.status(200).json({ ok: true, ...result, timestamp: new Date().toISOString() });
-  } catch (err) {
-    console.error('Replenishment failed:', err);
-    return res.status(500).json({ ok: false, error: err.message, timestamp: new Date().toISOString() });
+  // Quick test mode: ?test=1 makes a single DataForSEO call to verify API works
+  if (req.query?.test === '1') {
+    try {
+      const auth = DATAFORSEO_AUTH();
+      const testRes = await fetch('https://api.dataforseo.com/v3/serp/google/organic/live/advanced', {
+        method: 'POST',
+        headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify([{ keyword: 'fitness blog write for us', location_code: 2840, language_code: 'en', depth: 100 }]),
+      });
+      const data = await testRes.json();
+      const task = data.tasks?.[0];
+      const organic = (task?.result?.[0]?.items || []).filter(i => i.type === 'organic').length;
+      return res.status(200).json({
+        ok: true,
+        authPrefix: auth.slice(0, 12),
+        httpStatus: testRes.status,
+        taskStatus: task?.status_code,
+        taskMessage: task?.status_message,
+        organicResults: organic,
+        envVars: {
+          hasLogin: !!DATAFORSEO_LOGIN,
+          hasPassword: !!DATAFORSEO_PASSWORD,
+          hasAuth: !!(process.env.DATAFORSEO_AUTH || '').trim(),
+          loginLen: DATAFORSEO_LOGIN.length,
+          passwordLen: DATAFORSEO_PASSWORD.length,
+        },
+      });
+    } catch (err) {
+      return res.status(500).json({ ok: false, error: err.message });
+    }
   }
+
+  // Run full replenishment in background, return immediately
+  const { waitUntil } = require('@vercel/functions');
+  const promise = runReplenishment()
+    .then(async result => {
+      const { logCronRun } = require('../../shared/airtable');
+      await logCronRun('prospect-replenish').catch(e => console.error('[prospect-replenish] logCronRun:', e.message));
+    })
+    .catch(err => console.error('Replenishment failed:', err));
+  waitUntil(promise);
+  return res.status(200).json({ status: 'processing', timestamp: new Date().toISOString() });
 };
