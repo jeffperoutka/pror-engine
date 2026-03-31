@@ -19,6 +19,7 @@ const AIRTABLE_BASE = (process.env.AIRTABLE_BASE || process.env.AIRTABLE_BASE_ID
 const CHANNEL = () => process.env.CHANNEL_COMMAND_CENTER;
 
 const TIMEOUT_SAFETY_MS = 200_000; // Stop processing new clients after 200s (sync handler, 300s limit)
+const MAX_CLIENTS_PER_RUN = 3;     // Process max 3 clients per run to stay within 300s
 const REPLENISH_THRESHOLD = 150;   // Trigger replenish if < 150 unsent prospects remain
 const SUFFIXES = [
   'write for us', 'guest post', 'submit article', 'contribute',
@@ -708,14 +709,21 @@ async function runReplenishment() {
     console.log(`  ${config.slug}: ${remaining} remaining — ${urgent}`);
   }
 
-  // Step 2: Process clients in priority order, respecting timeout
+  // Step 2: Process clients in priority order, respecting timeout + max per run
   const results = [];
   const deferred = [];
+  let processedCount = 0;
 
   for (const { config, remaining } of clientStatus) {
     // Skip clients above threshold immediately (no need to call processClient)
     if (remaining >= REPLENISH_THRESHOLD) {
       results.push({ slug: config.slug, name: config.name, status: 'skipped', remaining, newProspects: 0, reason: `${remaining} remaining >= ${REPLENISH_THRESHOLD} threshold` });
+      continue;
+    }
+
+    // Cap at MAX_CLIENTS_PER_RUN to stay within 300s Vercel timeout
+    if (processedCount >= MAX_CLIENTS_PER_RUN) {
+      deferred.push({ slug: config.slug, name: config.name, remaining, reason: 'max-per-run' });
       continue;
     }
 
@@ -725,13 +733,15 @@ async function runReplenishment() {
       continue;
     }
 
-    console.log(`\n--- Processing ${config.slug} (${remaining} remaining) ---`);
+    console.log(`\n--- Processing ${config.slug} (${remaining} remaining) [${processedCount + 1}/${MAX_CLIENTS_PER_RUN}] ---`);
     try {
       const result = await processClient(config, week, globalDedupeSet, remaining);
       results.push(result);
+      processedCount++;
     } catch (err) {
       console.error(`Error processing ${config.slug}: ${err.message}`);
       results.push({ slug: config.slug, name: config.name, status: 'error', error: err.message, remaining });
+      processedCount++;
     }
   }
 
