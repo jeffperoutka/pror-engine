@@ -24,8 +24,8 @@ const CHANNEL = () => process.env.CHANNEL_COMMAND_CENTER;
 // Drip step delays (days after step 1)
 const DRIP_DELAYS = { 1: 0, 2: 3, 3: 7, 4: 14 };
 
-// Daily send limits per client
-const MAX_PER_CLIENT = 55;
+// Daily send limits per client (30 per run × multiple runs = ~55/day target)
+const MAX_PER_CLIENT = 30;
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
@@ -148,8 +148,13 @@ async function runDripSender() {
   let totalSkipped = 0;
   const clientSummaries = [];
 
-  // 3. Process each client
+  // 3. Process each client (stop 30s before Vercel timeout)
+  const SAFETY_MS = 270_000;
   for (const [slug, records] of Object.entries(byClient)) {
+    if (Date.now() - startTime > SAFETY_MS) {
+      console.log(`[drip-sender] Safety timeout — stopping after ${((Date.now() - startTime) / 1000).toFixed(0)}s`);
+      break;
+    }
     const template = TEMPLATES[slug];
     if (!template) {
       console.error(`[drip-sender] No template for ${slug}, skipping ${records.length} records`);
