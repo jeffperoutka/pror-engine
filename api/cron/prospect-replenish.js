@@ -588,16 +588,21 @@ async function processClient(clientConfig, week, globalDedupeSet) {
   const serpQueryCount = keywords.length * SUFFIXES.length;
   log(`Got ${serpResults.length} raw SERP results`);
 
-  // Step 4: Dedupe domains
+  // Step 4: Dedupe domains (with debug counters)
   const uniqueDomains = new Map(); // domain -> { url, title }
+  let dbgBlocked = 0, dbgExisting = 0, dbgGlobal = 0, dbgDupeInBatch = 0;
+  const seenInBatch = new Set();
   for (const r of serpResults) {
-    if (isDomainBlocked(r.domain)) continue;
-    if (existingDomains.has(r.domain)) continue;
-    if (globalDedupeSet.has(r.domain)) continue;
+    if (isDomainBlocked(r.domain)) { dbgBlocked++; continue; }
+    if (existingDomains.has(r.domain)) { dbgExisting++; continue; }
+    if (globalDedupeSet.has(r.domain)) { dbgGlobal++; continue; }
+    if (seenInBatch.has(r.domain)) { dbgDupeInBatch++; continue; }
+    seenInBatch.add(r.domain);
     if (!uniqueDomains.has(r.domain)) {
       uniqueDomains.set(r.domain, { url: r.url, title: r.title });
     }
   }
+  log(`Dedup breakdown: ${serpResults.length} raw → ${dbgBlocked} blocked, ${dbgExisting} existing, ${dbgGlobal} global-dedup, ${dbgDupeInBatch} dupe-in-batch → ${uniqueDomains.size} new`);
 
   // Add to global dedupe set
   for (const domain of uniqueDomains.keys()) {
@@ -607,7 +612,7 @@ async function processClient(clientConfig, week, globalDedupeSet) {
   log(`${uniqueDomains.size} unique new domains after dedup`);
 
   if (uniqueDomains.size === 0) {
-    return { slug, name, status: 'no_new', remaining, newProspects: 0, serpQueries: serpQueryCount, reason: 'No new domains found after dedup' };
+    return { slug, name, status: 'no_new', remaining, newProspects: 0, serpQueries: serpQueryCount, reason: `No new domains found after dedup`, debug: `${serpResults.length} raw → ${dbgBlocked} blocked, ${dbgExisting} existing, ${dbgGlobal} xClient, ${dbgDupeInBatch} dupe → 0 new` };
   }
 
   // Step 5: Email lookup
@@ -725,7 +730,7 @@ async function runReplenishment() {
     } else if (r.status === 'skipped') {
       summary += `:fast_forward: *${r.slug}:* ${r.remaining} remaining — skipped\n`;
     } else if (r.status === 'no_new' || r.status === 'no_emails') {
-      summary += `:warning: *${r.slug}:* ${r.reason} (was at ${r.remaining} remaining)\n`;
+      summary += `:warning: *${r.slug}:* ${r.reason} (was at ${r.remaining} remaining)${r.debug ? `\n    _${r.debug}_` : ''}\n`;
     } else if (r.status === 'error') {
       summary += `:x: *${r.slug}:* Error — ${r.error}\n`;
     }
