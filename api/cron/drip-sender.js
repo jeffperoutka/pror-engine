@@ -284,21 +284,22 @@ module.exports = async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const promise = runDripSender()
-    .then(async (result) => {
-      const { logCronRun } = require('../../shared/airtable');
-      await logCronRun('drip-sender').catch(e => console.error('[drip-sender] logCronRun:', e.message));
-      console.log(`[drip-sender] Done: ${JSON.stringify(result)}`);
-    })
-    .catch(err => {
-      console.error('[drip-sender] Fatal error:', err);
+  try {
+    const result = await runDripSender();
+    const { logCronRun } = require('../../shared/airtable');
+    await logCronRun('drip-sender').catch(e => console.error('[drip-sender] logCronRun:', e.message));
+    console.log(`[drip-sender] Done: ${JSON.stringify(result)}`);
+    res.status(200).json({
+      ok: true,
+      ...result,
+      timestamp: new Date().toISOString(),
     });
-
-  waitUntil(promise);
-
-  res.status(200).json({
-    ok: true,
-    message: 'Drip sender started. Results will be posted to Slack.',
-    timestamp: new Date().toISOString(),
-  });
+  } catch (err) {
+    console.error('[drip-sender] Fatal error:', err);
+    res.status(500).json({
+      ok: false,
+      error: err.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
 };
