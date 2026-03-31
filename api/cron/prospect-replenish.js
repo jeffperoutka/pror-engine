@@ -308,7 +308,12 @@ async function getExistingEmails() {
 }
 
 // ─── DataForSEO API ────────────────────────────────────────────────────────────
-const DATAFORSEO_AUTH = () => Buffer.from(`${DATAFORSEO_LOGIN}:${DATAFORSEO_PASSWORD}`).toString('base64');
+const DATAFORSEO_AUTH = () => {
+  // Prefer pre-computed auth, fall back to login:password
+  const precomputed = (process.env.DATAFORSEO_AUTH || '').trim();
+  if (precomputed) return precomputed;
+  return Buffer.from(`${DATAFORSEO_LOGIN}:${DATAFORSEO_PASSWORD}`).toString('base64');
+};
 
 /**
  * Query DataForSEO SERP API for fresh prospect domains.
@@ -587,7 +592,8 @@ async function processClient(clientConfig, week, globalDedupeSet) {
   log(`Found ${existingEmails.size} existing emails, ${existingDomains.size} domains to skip`);
 
   // Step 3: SERP scraping
-  log(`Scraping SERPs (${keywords.length} keywords x ${SUFFIXES.length} suffixes = ${keywords.length * SUFFIXES.length} queries)...`);
+  const authToken = DATAFORSEO_AUTH();
+  log(`Scraping SERPs (${keywords.length} keywords x ${SUFFIXES.length} suffixes = ${keywords.length * SUFFIXES.length} queries, auth=${authToken.slice(0,8)}...)`);
   const serpResults = await scrapeSERPs(keywords);
   const serpQueryCount = keywords.length * SUFFIXES.length;
   log(`Got ${serpResults.length} raw SERP results`);
@@ -782,22 +788,16 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  // Return immediately, process in background
-  const promise = runReplenishment()
-    .then(async result => {
-      console.log(`Replenishment complete: ${result.totalNewProspects} new prospects, $${result.totalCost.toFixed(2)} cost`);
-      const { logCronRun } = require('../../shared/airtable');
-      await logCronRun('prospect-replenish').catch(e => console.error('[prospect-replenish] logCronRun:', e.message));
-    })
-    .catch(err => {
-      console.error('Replenishment failed:', err);
+  // Run synchronously so results appear in HTTP response and Vercel logs
+  try {
+    const result = await runReplenishment();
+    const { logCronRun } = require('../../shared/airtable');
+    await logCronRun('prospect-replenish').catch(e => console.error('[prospect-replenish] logCronRun:', e.message));
+    return res.status(200).json({ ok: true, ...result, timestamp: new Date().toISOString() });
+  } catch (err) {
+    console.error('Replenishment failed:', err);
     });
 
-  waitUntil(promise);
-
-  res.status(200).json({
-    status: 'processing',
-    message: 'Prospect replenishment started. Results will be posted to Slack.',
-    timestamp: new Date().toISOString(),
-  });
+    return res.status(500).json({ ok: false, error: err.message, timestamp: new Date().toISOString() });
+  }
 };
