@@ -571,14 +571,13 @@ function isDomainBlocked(domain) {
 }
 
 // ─── Main Pipeline per Client ──────────────────────────────────────────────────
-async function processClient(clientConfig, week, globalDedupeSet) {
+async function processClient(clientConfig, week, globalDedupeSet, preCountedRemaining) {
   const { slug, name, keywords } = clientConfig;
   const log = (msg) => console.log(`  [${slug}] ${msg}`);
 
-  // Step 1: Check remaining unsent prospects
-  log('Checking unsent prospects...');
-  const remaining = await countUnsentProspects(slug);
-  log(`Remaining unsent: ${remaining}`);
+  // Use pre-counted remaining from parallel step (skip redundant Airtable call)
+  const remaining = preCountedRemaining;
+  log(`Remaining unsent: ${remaining} (pre-counted)`);
 
   if (remaining >= REPLENISH_THRESHOLD) {
     return { slug, name, status: 'skipped', remaining, newProspects: 0, reason: `${remaining} remaining >= ${REPLENISH_THRESHOLD} threshold` };
@@ -714,6 +713,12 @@ async function runReplenishment() {
   const deferred = [];
 
   for (const { config, remaining } of clientStatus) {
+    // Skip clients above threshold immediately (no need to call processClient)
+    if (remaining >= REPLENISH_THRESHOLD) {
+      results.push({ slug: config.slug, name: config.name, status: 'skipped', remaining, newProspects: 0, reason: `${remaining} remaining >= ${REPLENISH_THRESHOLD} threshold` });
+      continue;
+    }
+
     const elapsed = Date.now() - startTime;
     if (elapsed > TIMEOUT_SAFETY_MS) {
       deferred.push({ slug: config.slug, name: config.name, remaining, reason: 'timeout' });
@@ -722,7 +727,7 @@ async function runReplenishment() {
 
     console.log(`\n--- Processing ${config.slug} (${remaining} remaining) ---`);
     try {
-      const result = await processClient(config, week, globalDedupeSet);
+      const result = await processClient(config, week, globalDedupeSet, remaining);
       results.push(result);
     } catch (err) {
       console.error(`Error processing ${config.slug}: ${err.message}`);
