@@ -342,7 +342,7 @@ async function scrapeSERPs(keywords) {
       keyword: q.keyword,
       location_code: q.location_code,
       language_code: q.language_code,
-      depth: 300,
+      depth: 100,
     }));
 
     try {
@@ -359,6 +359,10 @@ async function scrapeSERPs(keywords) {
 
       if (data.tasks) {
         for (const task of data.tasks) {
+          if (task.status_code !== 20000) {
+            console.error(`DataForSEO task error: ${task.status_code} ${task.status_message}`);
+            continue;
+          }
           if (task.result) {
             for (const resultSet of task.result) {
               if (resultSet.items) {
