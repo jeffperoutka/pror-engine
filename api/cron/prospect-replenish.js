@@ -328,9 +328,9 @@ const LOCATIONS = [
 ];
 
 async function scrapeSERPs(keywords) {
-  // Randomly select 5 keywords per run to stay within timeout (5 × 7 suffixes = 35 queries)
+  // Randomly select 3 keywords per run to stay within timeout (3 × 7 suffixes = 21 queries)
   const shuffled = [...keywords].sort(() => Math.random() - 0.5);
-  const selected = shuffled.slice(0, 5);
+  const selected = shuffled.slice(0, 3);
 
   const queries = [];
   for (const kw of selected) {
@@ -596,9 +596,9 @@ async function processClient(clientConfig, week, globalDedupeSet) {
 
   // Step 3: SERP scraping
   const authToken = DATAFORSEO_AUTH();
-  log(`Scraping SERPs (${keywords.length} keywords x ${SUFFIXES.length} suffixes = ${keywords.length * SUFFIXES.length} queries, auth=${authToken.slice(0,8)}...)`);
+  const serpQueryCount = Math.min(3, keywords.length) * SUFFIXES.length;
+  log(`Scraping SERPs (3 keywords x ${SUFFIXES.length} suffixes = ${serpQueryCount} queries, auth=${authToken.slice(0,8)}...)`);
   const serpResults = await scrapeSERPs(keywords);
-  const serpQueryCount = keywords.length * SUFFIXES.length;
   log(`Got ${serpResults.length} raw SERP results`);
 
   // Step 4: Dedupe domains (with debug counters)
@@ -686,18 +686,19 @@ async function runReplenishment() {
   console.log(`=== Prospect Replenishment — ${dateStr} ===`);
   console.log(`Warming week: ${week} (new subdomain limit: ${WARMING_SCHEDULE[Math.min(week, 4)]}/day)`);
 
-  // Step 1: Check remaining prospects for all clients to prioritize
-  console.log('\nChecking remaining prospects for all clients...');
-  const clientStatus = [];
-  for (const config of CLIENT_CONFIGS) {
-    try {
-      const remaining = await countUnsentProspects(config.slug);
-      clientStatus.push({ config, remaining });
-    } catch (err) {
-      console.error(`Error checking ${config.slug}: ${err.message}`);
-      clientStatus.push({ config, remaining: 999, error: err.message });
-    }
-  }
+  // Step 1: Check remaining prospects for all clients IN PARALLEL (was sequential, took ~40s)
+  console.log('\nChecking remaining prospects for all clients (parallel)...');
+  const clientStatus = await Promise.all(
+    CLIENT_CONFIGS.map(async (config) => {
+      try {
+        const remaining = await countUnsentProspects(config.slug);
+        return { config, remaining };
+      } catch (err) {
+        console.error(`Error checking ${config.slug}: ${err.message}`);
+        return { config, remaining: 999, error: err.message };
+      }
+    })
+  );
 
   // Sort by remaining (ascending) — most urgent first
   clientStatus.sort((a, b) => a.remaining - b.remaining);
