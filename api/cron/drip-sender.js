@@ -53,6 +53,7 @@ async function atFetch(endpoint, method = 'GET', body = null) {
  */
 async function getDueRecords() {
   const today = new Date().toISOString().split('T')[0];
+  console.log(`[drip-sender] getDueRecords — today=${today}, base=${AIRTABLE_BASE}, pat=${AIRTABLE_PAT ? AIRTABLE_PAT.substring(0, 10) + '...' : 'MISSING'}`);
   const records = [];
   let offset = null;
 
@@ -63,7 +64,10 @@ async function getDueRecords() {
     });
     if (offset) params.set('offset', offset);
 
-    const data = await atFetch(`/DripQueue?${params}`);
+    const url = `/DripQueue?${params}`;
+    console.log(`[drip-sender] Fetching: ${url.substring(0, 120)}`);
+    const data = await atFetch(url);
+    console.log(`[drip-sender] Got ${(data.records || []).length} records, offset=${data.offset || 'none'}`);
     records.push(...(data.records || []));
     offset = data.offset || null;
     if (offset) await sleep(200);
