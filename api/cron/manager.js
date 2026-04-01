@@ -385,21 +385,28 @@ async function checkPipelineIntegrity() {
         campaignIds = [];
       }
 
-      for (const cid of campaignIds) {
+      // Check all campaign IDs in parallel to avoid compounding sequential Brevo calls
+      const campaignChecks = campaignIds.map(async (cid) => {
         try {
           const campaign = await brevoFetch(`/emailCampaigns/${cid}`);
           if (campaign.status === 'queued' || campaign.status === 'draft') {
-            alerts.push({
+            return {
               level: 'critical',
               client: neg.Client || 'Unknown',
               message: `Drip campaign #${cid} still scheduled for ${domain} AFTER they replied — needs cancellation`,
               autoFixable: 'cancel_drip',
               meta: { campaignId: cid },
-            });
+            };
           }
         } catch {
           // Campaign may not exist or API error — skip
         }
+        return null;
+      });
+
+      const results = await Promise.all(campaignChecks);
+      for (const result of results) {
+        if (result) alerts.push(result);
       }
     }
   }

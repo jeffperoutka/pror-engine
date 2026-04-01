@@ -154,19 +154,74 @@ function rateLimitedFetch(method, path, body = null) {
   return enqueue(() => engainFetch(method, path, body));
 }
 
+// ── Thread Validation ──
+
+/**
+ * Check if a Reddit thread is archived/locked before posting.
+ * Reddit auto-archives threads after ~180 days.
+ * Returns { archived, age, locked, error } or throws on network failure.
+ */
+async function checkThreadStatus(threadUrl) {
+  const jsonUrl = threadUrl
+    .replace('www.reddit.com', 'old.reddit.com')
+    .replace(/\/$/, '') + '.json?limit=1';
+
+  try {
+    const resp = await fetch(jsonUrl, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ProrEngine/1.0)' },
+    });
+    if (!resp.ok) {
+      return { archived: null, error: `HTTP ${resp.status}` };
+    }
+    const data = await resp.json();
+    const post = data?.[0]?.data?.children?.[0]?.data;
+    if (!post) return { archived: null, error: 'Could not parse thread data' };
+
+    const ageDays = Math.floor((Date.now() / 1000 - post.created_utc) / 86400);
+    return {
+      archived: post.archived || ageDays > 180,
+      locked: post.locked,
+      age: ageDays,
+      subreddit: post.subreddit,
+      title: post.title,
+    };
+  } catch (err) {
+    return { archived: null, error: err.message };
+  }
+}
+
 // ── Task Creation ──
 
 /**
  * Post a comment on a Reddit thread.
+ * Checks thread archive status first — rejects if archived.
+ *
  * @param {string} threadUrl - Reddit post URL
- * @param {string} text - Comment text
+ * @param {string} content - Comment text
  * @param {string} [scheduleAt] - ISO 8601 datetime (optional)
+ * @param {object} [opts] - { skipArchiveCheck: false }
  */
-async function createComment(threadUrl, text, scheduleAt) {
+async function createComment(threadUrl, content, scheduleAt, opts = {}) {
+  if (!opts.skipArchiveCheck) {
+    const status = await checkThreadStatus(threadUrl);
+    if (status.archived) {
+      const err = new Error(`Thread is archived (${status.age} days old): ${threadUrl}`);
+      err.code = 'THREAD_ARCHIVED';
+      err.threadStatus = status;
+      throw err;
+    }
+    if (status.locked) {
+      const err = new Error(`Thread is locked: ${threadUrl}`);
+      err.code = 'THREAD_LOCKED';
+      err.threadStatus = status;
+      throw err;
+    }
+  }
+
   const body = {
-    project_id: getProjectId(),
-    thread_url: threadUrl,
-    text,
+    projectId: getProjectId(),
+    url: threadUrl,
+    content,
   };
   if (scheduleAt) body.schedule_at = scheduleAt;
   return rateLimitedFetch('POST', '/tasks/comment', body);
@@ -174,18 +229,26 @@ async function createComment(threadUrl, text, scheduleAt) {
 
 /**
  * Create a new Reddit post.
- * @param {string} subreddit - Subreddit name (e.g., "technology" or "r/technology")
+ * @param {string} subreddit - Subreddit name or URL (e.g., "technology", "r/technology", or full URL)
  * @param {string} title - Post title
- * @param {string} text - Post body text
+ * @param {string} content - Post body text
  * @param {string} [scheduleAt] - ISO 8601 datetime (optional)
  */
-async function createPost(subreddit, title, text, scheduleAt) {
-  const subName = subreddit.replace(/^r\//, '').replace(/^\/r\//, '').trim();
+async function createPost(subreddit, title, content, scheduleAt) {
+  // Accept either subreddit name or full URL
+  let subredditUrl;
+  if (subreddit.startsWith('http')) {
+    subredditUrl = subreddit;
+  } else {
+    const subName = subreddit.replace(/^r\//, '').replace(/^\/r\//, '').trim();
+    subredditUrl = `https://reddit.com/r/${subName}`;
+  }
+
   const body = {
-    project_id: getProjectId(),
-    subreddit: subName,
-    title,
-    text,
+    projectId: getProjectId(),
+    subredditUrl,
+    postTitle: title,
+    content,
   };
   if (scheduleAt) body.schedule_at = scheduleAt;
   return rateLimitedFetch('POST', '/tasks/post', body);
@@ -194,14 +257,14 @@ async function createPost(subreddit, title, text, scheduleAt) {
 /**
  * Reply to a Reddit comment.
  * @param {string} commentUrl - Reddit comment permalink URL
- * @param {string} text - Reply text
+ * @param {string} content - Reply text
  * @param {string} [scheduleAt] - ISO 8601 datetime (optional)
  */
-async function createReply(commentUrl, text, scheduleAt) {
+async function createReply(commentUrl, content, scheduleAt) {
   const body = {
-    project_id: getProjectId(),
-    comment_url: commentUrl,
-    text,
+    projectId: getProjectId(),
+    url: commentUrl,
+    content,
   };
   if (scheduleAt) body.schedule_at = scheduleAt;
   return rateLimitedFetch('POST', '/tasks/reply', body);
@@ -215,8 +278,8 @@ async function createReply(commentUrl, text, scheduleAt) {
  */
 async function createUpvote(targetUrl, count = 3, scheduleAt) {
   const body = {
-    project_id: getProjectId(),
-    target_url: targetUrl,
+    projectId: getProjectId(),
+    url: targetUrl,
     count,
   };
   if (scheduleAt) body.schedule_at = scheduleAt;
@@ -230,7 +293,7 @@ async function createUpvote(targetUrl, count = 3, scheduleAt) {
  * @param {string} taskId
  */
 async function getTask(taskId) {
-  return rateLimitedFetch('GET', `/tasks/${taskId}`);
+  return rateLimitedFetch('GET', `/tasks/${taskId}?projectId=${getProjectId()}`);
 }
 
 /**
@@ -239,15 +302,17 @@ async function getTask(taskId) {
  */
 async function listTasks(filters = {}) {
   const params = new URLSearchParams();
+  params.set('projectId', getProjectId());
   if (filters.status) params.set('status', filters.status);
   if (filters.type) params.set('type', filters.type);
   if (filters.limit) params.set('limit', String(filters.limit));
   if (filters.offset) params.set('offset', String(filters.offset));
   const qs = params.toString();
-  return rateLimitedFetch('GET', `/tasks${qs ? `?${qs}` : ''}`);
+  return rateLimitedFetch('GET', `/tasks?${qs}`);
 }
 
 module.exports = {
+  checkThreadStatus,
   createComment,
   createPost,
   createReply,

@@ -45,3 +45,6 @@ See `.env.example` for full list.
 ## Rules
 - `rules/reddit.json` — Reddit generation rules (scope, uniqueness)
 - Rules are loaded at agent init and injected into system prompts
+
+## Client Info Doc — MANDATORY
+Before generating ANY content (Reddit comments, posts, replies, link building copy) for a client, you MUST read their Client Info Doc from Google Drive Brand Master (`1ir5zhtrjSZTXFNWLqkkSALN4Sj3S5Rsn`). This contains brand voice, target audience, competitors, do-not-say list, preferred terms, geographic focus, and key messages. See global CLAUDE.md Rule #10 for access instructions. Skipping this produces off-brand content.

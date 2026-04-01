@@ -19,6 +19,14 @@ const AIRTABLE_API_KEY = process.env.AIRTABLE_API_KEY || process.env.AIRTABLE_PA
 const MASTERSHEETS = 'appEGWJRxSrTv3IOL';
 const PROR_DB = (process.env.AIRTABLE_BASE_ID || process.env.AIRTABLE_BASE || 'app3v0KJ4kQimscg3').trim();
 
+function extractDomain(emailOrFrom) {
+  const match = emailOrFrom.match(/@([a-z0-9.-]+\.[a-z]{2,})/i);
+  if (!match) return null;
+  const d = match[1].toLowerCase();
+  const freemail = ['gmail.com','yahoo.com','hotmail.com','outlook.com','aol.com','icloud.com','protonmail.com','mail.com','zoho.com','yandex.com'];
+  return freemail.includes(d) ? null : d;
+}
+
 // ── Airtable direct fetch (for MASTERSHEETS cross-base queries) ─────────────
 
 async function atFetch(base, table, params = {}) {
@@ -36,9 +44,10 @@ async function atFetch(base, table, params = {}) {
 async function getInboxOpportunities() {
   try {
     const messages = await gmail.listMessages('is:unread', 30);
-    if (!messages.length) return { total: 0, replies: 0, inbound: 0 };
+    if (!messages.length) return { total: 0, replies: 0, inbound: 0, uniqueDomains: 0 };
 
     let replies = 0, inbound = 0;
+    const domains = new Set();
     for (const { id } of messages.slice(0, 10)) {
       try {
         const email = await gmail.getMessage(id);
@@ -50,12 +59,14 @@ async function getInboxOpportunities() {
         );
         if (isReply) replies++;
         if (isInbound) inbound++;
+        const domain = extractDomain(email.from);
+        if (domain && (isReply || isInbound)) domains.add(domain);
       } catch { /* skip */ }
     }
 
-    return { total: messages.length, replies, inbound };
+    return { total: messages.length, replies, inbound, uniqueDomains: domains.size };
   } catch {
-    return { total: 0, replies: 0, inbound: 0 };
+    return { total: 0, replies: 0, inbound: 0, uniqueDomains: 0 };
   }
 }
 
@@ -82,12 +93,21 @@ async function getYesterdayActivity() {
       } catch { /* skip */ }
     }
 
+    const uniqueDomains = new Set();
+    for (const e of received) {
+      if (e.type !== 'spam') {
+        const domain = extractDomain(e.from);
+        if (domain) uniqueDomains.add(domain);
+      }
+    }
+
     return {
       received: received.length,
       sent: sentToday.length,
       replies: received.filter(e => e.type === 'reply').length,
       inbound: received.filter(e => e.type === 'inbound').length,
       spam: received.filter(e => e.type === 'spam').length,
+      uniqueDomains: uniqueDomains.size,
       recentEmails: received.filter(e => e.type !== 'spam').slice(0, 8),
     };
   } catch (err) {
@@ -179,10 +199,16 @@ async function getClientProgress() {
 
 async function getBotActivity() {
   try {
-    const data = await atFetch(PROR_DB, 'OUTREACH', { pageSize: 1 });
-    return { totalOutreach: data.totalRecords || 0 };
+    const [outreach, dripQueue] = await Promise.all([
+      atFetch(PROR_DB, 'OUTREACH', { pageSize: 1 }),
+      atFetch(PROR_DB, 'tbl8wLrkyZdM4f9nU', { pageSize: 1 }),
+    ]);
+    return {
+      totalOutreach: outreach.totalRecords || 0,
+      dripQueueTotal: dripQueue.totalRecords || 0,
+    };
   } catch {
-    return { totalOutreach: 0 };
+    return { totalOutreach: 0, dripQueueTotal: 0 };
   }
 }
 
@@ -263,7 +289,8 @@ function buildDigest(date, inbox, clients, activity, actionItems, weekendRecap, 
 
   // Inbox
   const opTotal = inbox.replies + inbox.inbound;
-  lines.push(`📧 *Inbox — ${opTotal > 0 ? opTotal + ' opportunities' : 'all clear'}*`);
+  const uniqueLabel = inbox.uniqueDomains > 0 ? ` from ${inbox.uniqueDomains} unique site${inbox.uniqueDomains === 1 ? '' : 's'}` : '';
+  lines.push(`📧 *Inbox — ${opTotal > 0 ? opTotal + ' opportunities' + uniqueLabel : 'all clear'}*`);
   if (inbox.replies > 0) lines.push(`  • ↩️ ${inbox.replies} repl${inbox.replies === 1 ? 'y' : 'ies'} to outreach`);
   if (inbox.inbound > 0) lines.push(`  • 📥 ${inbox.inbound} inbound pitch${inbox.inbound === 1 ? '' : 'es'}`);
   const other = inbox.total - inbox.replies - inbox.inbound;
@@ -274,7 +301,8 @@ function buildDigest(date, inbox, clients, activity, actionItems, weekendRecap, 
   // Yesterday's activity
   if (yesterday && (yesterday.received > 0 || yesterday.sent > 0)) {
     lines.push(`📬 *Last 24h Activity*`);
-    lines.push(`  • ${yesterday.received} emails received (${yesterday.replies} replies, ${yesterday.inbound} inbound, ${yesterday.spam} spam)`);
+    const domainNote = yesterday.uniqueDomains > 0 ? ` · ${yesterday.uniqueDomains} unique sites` : '';
+    lines.push(`  • ${yesterday.received} emails received (${yesterday.replies} replies, ${yesterday.inbound} inbound, ${yesterday.spam} spam)${domainNote}`);
     if (yesterday.sent > 0) lines.push(`  • ${yesterday.sent} auto-replies sent by bot`);
     if (yesterday.recentEmails.length > 0) {
       lines.push(`  *Key emails:*`);
@@ -337,6 +365,7 @@ function buildDigest(date, inbox, clients, activity, actionItems, weekendRecap, 
 
   // Bot activity
   lines.push(`📊 *Bot Activity*`);
+  if (activity.dripQueueTotal > 0) lines.push(`  • ${activity.dripQueueTotal.toLocaleString()} unique sites in DripQueue`);
   lines.push(`  • ${activity.totalOutreach.toLocaleString()} total domains in outreach database`);
   lines.push('');
 

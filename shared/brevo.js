@@ -15,7 +15,7 @@
 
 const BASE = 'https://api.brevo.com/v3';
 const REQUEST_DELAY_MS = 600; // 100 req/min = ~600ms between requests
-const DEFAULT_TIMEOUT_MS = 30000;
+const DEFAULT_TIMEOUT_MS = 60000;
 
 let lastRequestTime = 0;
 let requestQueue = Promise.resolve();
@@ -54,43 +54,62 @@ async function brevoFetch(path, options = {}) {
   const key = process.env.BREVO_API_KEY;
   if (!key) throw new Error('[brevo] BREVO_API_KEY not set');
 
-  await rateLimit();
+  const maxRetries = options.retries ?? 1;
+  let lastError;
 
-  const url = `${BASE}${path}`;
-  const method = options.method || 'GET';
-  const headers = {
-    'api-key': key,
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
-  };
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    await rateLimit();
 
-  const fetchOpts = { method, headers };
-  if (options.body) fetchOpts.body = JSON.stringify(options.body);
+    const url = `${BASE}${path}`;
+    const method = options.method || 'GET';
+    const headers = {
+      'api-key': key,
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+    };
 
-  console.log(`[brevo] ${method} ${path}`);
-  const resp = await withTimeout(fetch(url, fetchOpts));
-  const text = await resp.text();
+    const fetchOpts = { method, headers };
+    if (options.body) fetchOpts.body = JSON.stringify(options.body);
 
-  // Some endpoints return 204 with no body
-  if (!text) return { _status: resp.status };
+    const attemptLabel = attempt > 0 ? ` (retry ${attempt}/${maxRetries})` : '';
+    console.log(`[brevo] ${method} ${path}${attemptLabel}`);
 
-  let data;
-  try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`[brevo] Non-JSON response (${resp.status}): ${text.slice(0, 200)}`);
+    try {
+      const resp = await withTimeout(fetch(url, fetchOpts), options.timeout || DEFAULT_TIMEOUT_MS);
+      const text = await resp.text();
+
+      // Some endpoints return 204 with no body
+      if (!text) return { _status: resp.status };
+
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`[brevo] Non-JSON response (${resp.status}): ${text.slice(0, 200)}`);
+      }
+
+      if (!resp.ok) {
+        const msg = data.message || data.error || JSON.stringify(data);
+        const err = new Error(`[brevo] ${method} ${path} -> ${resp.status}: ${msg}`);
+        err.status = resp.status;
+        err.body = data;
+        throw err;
+      }
+
+      data._status = resp.status;
+      return data;
+    } catch (err) {
+      lastError = err;
+      const isTimeout = err.message && err.message.includes('timed out');
+      if (isTimeout && attempt < maxRetries) {
+        console.warn(`[brevo] ${method} ${path} timed out, retrying (${attempt + 1}/${maxRetries})...`);
+        continue;
+      }
+      throw err;
+    }
   }
 
-  if (!resp.ok) {
-    const msg = data.message || data.error || JSON.stringify(data);
-    const err = new Error(`[brevo] ${method} ${path} -> ${resp.status}: ${msg}`);
-    err.status = resp.status;
-    err.body = data;
-    throw err;
-  }
-
-  data._status = resp.status;
-  return data;
+  throw lastError;
 }
 
 // ---------------------------------------------------------------------------
