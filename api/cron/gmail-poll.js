@@ -802,8 +802,20 @@ async function processInbox() {
           }
         }
 
+        // ── PRICE CONFIRMED: send acceptance reply to lock it in ──
+        if (c.price_confirmed && c.price_mentioned <= maxPrice && !recentAutoReply) {
+          const confirmReply = `Hey, that works for us — $${c.price_mentioned} is good. We'll start preparing content and will be in touch soon to coordinate. Looking forward to working together!\n\nBest,\nDaniel / Content Partnerships`;
+          try {
+            await gmail.sendReply(email.messageId, email.threadId, extractReplyAddress(email.from), email.subject, confirmReply);
+            autoReplySent = true;
+            replyText = confirmReply;
+            console.error(`[SEND] price-confirmed reply to ${senderDomain} at $${c.price_mentioned}`);
+          } catch (e) {
+            console.error(`[SEND] confirm err=${e.message?.slice(0, 40)}`);
+          }
+        }
         // ── AUTO-REPLY: send immediately unless flagged for Jeff or recent auto-reply ──
-        if (c.should_auto_reply && c.draft_reply && !recentAutoReply && c.suggested_action !== 'flag_jeff') {
+        else if (c.should_auto_reply && c.draft_reply && !recentAutoReply && c.suggested_action !== 'flag_jeff') {
           try {
             await gmail.sendReply(email.messageId, email.threadId, extractReplyAddress(email.from), email.subject, c.draft_reply);
             autoReplySent = true;

@@ -84,16 +84,41 @@ function fixEncoding(str) {
   return result;
 }
 
+function stripHtml(html) {
+  return html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/p>/gi, '\n\n')
+    .replace(/<\/div>/gi, '\n')
+    .replace(/<\/tr>/gi, '\n')
+    .replace(/<\/li>/gi, '\n')
+    .replace(/<[^>]+>/g, '')
+    .replace(/&nbsp;/gi, ' ')
+    .replace(/&amp;/gi, '&')
+    .replace(/&lt;/gi, '<')
+    .replace(/&gt;/gi, '>')
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
 function extractText(parts) {
-  let text = '';
+  let plainText = '';
+  let htmlText = '';
   for (const part of (parts || [])) {
     if (part.mimeType === 'text/plain' && part.body?.data) {
-      text += decodeBase64(part.body.data);
+      plainText += decodeBase64(part.body.data);
+    } else if (part.mimeType === 'text/html' && part.body?.data) {
+      htmlText += decodeBase64(part.body.data);
     } else if (part.parts) {
-      text += extractText(part.parts);
+      const nested = extractText(part.parts);
+      if (nested) plainText += nested;
     }
   }
-  return text;
+  // Prefer plain text, fall back to stripped HTML
+  return plainText || (htmlText ? stripHtml(htmlText) : '');
 }
 
 // ── Public API ───────────────────────────────────────────────────────────────
@@ -128,6 +153,10 @@ async function getMessage(messageId) {
   let body = '';
   if (msg.payload?.body?.data) {
     body = decodeBase64(msg.payload.body.data);
+    // Single-part HTML emails — strip tags
+    if (msg.payload.mimeType === 'text/html' || body.includes('<div') || body.includes('<html')) {
+      body = stripHtml(body);
+    }
   } else if (msg.payload?.parts) {
     body = extractText(msg.payload.parts);
   }
@@ -282,6 +311,9 @@ async function getThread(threadId) {
     let body = '';
     if (msg.payload?.body?.data) {
       body = decodeBase64(msg.payload.body.data);
+      if (msg.payload.mimeType === 'text/html' || body.includes('<div') || body.includes('<html')) {
+        body = stripHtml(body);
+      }
     } else if (msg.payload?.parts) {
       body = extractText(msg.payload.parts);
     }
