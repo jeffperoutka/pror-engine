@@ -723,8 +723,8 @@ async function processInbox() {
       if (c.type === 'link_exchange' || c.wants_link_exchange) {
         let autoReplySent = false;
         let replyText = '';
-        // Auto-reply for link exchanges
-        if (c.should_auto_reply && c.draft_reply && !recentAutoReply) {
+        // AUTO-REPLY KILL SWITCH — all replies paused by Jeff
+        if (false && c.should_auto_reply && c.draft_reply && !recentAutoReply) {
           try {
             await gmail.sendReply(email.messageId, email.threadId, extractReplyAddress(email.from), email.subject, c.draft_reply);
             autoReplySent = true;
@@ -802,8 +802,8 @@ async function processInbox() {
           }
         }
 
-        // ── PRICE CONFIRMED: send acceptance reply to lock it in ──
-        if (c.price_confirmed && c.price_mentioned <= maxPrice && !recentAutoReply) {
+        // ── PRICE CONFIRMED — PAUSED (kill switch active) ──
+        if (false && c.price_confirmed && c.price_mentioned <= maxPrice && !recentAutoReply) {
           const confirmReply = `Hey, that works for us — $${c.price_mentioned} is good. We'll start preparing content and will be in touch soon to coordinate. Looking forward to working together!\n\nBest,\nJeff / Content Partnerships`;
           try {
             await gmail.sendReply(email.messageId, email.threadId, extractReplyAddress(email.from), email.subject, confirmReply);
