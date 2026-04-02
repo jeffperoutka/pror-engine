@@ -216,7 +216,7 @@ LINK EXCHANGE RULES:
 
 TONE:
 - draft_reply: natural, conversational, peer-to-peer. No bullet points. Write like a real person.
-- Sign off as "Daniel / Content Partnerships"
+- Sign off as "Jeff / Content Partnerships"
 - NEVER promise calls or meetings. Email only.
 - Keep replies short (2-3 sentences max), friendly, move conversation forward.`;
 
@@ -804,7 +804,7 @@ async function processInbox() {
 
         // ── PRICE CONFIRMED: send acceptance reply to lock it in ──
         if (c.price_confirmed && c.price_mentioned <= maxPrice && !recentAutoReply) {
-          const confirmReply = `Hey, that works for us — $${c.price_mentioned} is good. We'll start preparing content and will be in touch soon to coordinate. Looking forward to working together!\n\nBest,\nDaniel / Content Partnerships`;
+          const confirmReply = `Hey, that works for us — $${c.price_mentioned} is good. We'll start preparing content and will be in touch soon to coordinate. Looking forward to working together!\n\nBest,\nJeff / Content Partnerships`;
           try {
             await gmail.sendReply(email.messageId, email.threadId, extractReplyAddress(email.from), email.subject, confirmReply);
             autoReplySent = true;
