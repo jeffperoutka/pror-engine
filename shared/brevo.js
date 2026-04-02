@@ -54,7 +54,7 @@ async function brevoFetch(path, options = {}) {
   const key = process.env.BREVO_API_KEY;
   if (!key) throw new Error('[brevo] BREVO_API_KEY not set');
 
-  const maxRetries = options.retries ?? 1;
+  const maxRetries = options.retries ?? 2;
   let lastError;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -85,7 +85,9 @@ async function brevoFetch(path, options = {}) {
       try {
         data = JSON.parse(text);
       } catch {
-        throw new Error(`[brevo] Non-JSON response (${resp.status}): ${text.slice(0, 200)}`);
+        const parseErr = new Error(`[brevo] Non-JSON response (${resp.status}): ${text.slice(0, 200)}`);
+        parseErr.status = resp.status;
+        throw parseErr;
       }
 
       if (!resp.ok) {
@@ -100,9 +102,13 @@ async function brevoFetch(path, options = {}) {
       return data;
     } catch (err) {
       lastError = err;
-      const isTimeout = err.message && err.message.includes('timed out');
-      if (isTimeout && attempt < maxRetries) {
-        console.warn(`[brevo] ${method} ${path} timed out, retrying (${attempt + 1}/${maxRetries})...`);
+      const isRetryable = (err.message && err.message.includes('timed out')) ||
+        (err.status && err.status >= 500) ||
+        (err.message && /Non-JSON response \(5\d\d\)/.test(err.message));
+      if (isRetryable && attempt < maxRetries) {
+        const waitMs = 1000 * (attempt + 1); // 1s, 2s, 3s backoff
+        console.warn(`[brevo] ${method} ${path} failed (${err.status || 'error'}), retrying in ${waitMs}ms (${attempt + 1}/${maxRetries})...`);
+        await new Promise(r => setTimeout(r, waitMs));
         continue;
       }
       throw err;
