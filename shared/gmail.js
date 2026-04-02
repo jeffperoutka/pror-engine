@@ -238,7 +238,8 @@ async function archiveMessage(messageId) {
  */
 async function getUnreadOutreachReplies(maxResults = 25) {
   // Fetch unread inbox messages, excluding already-processed ones
-  const messages = await listMessages('is:unread in:inbox -label:PROR_PROCESSED', maxResults);
+  // CRITICAL: Only read outreach replies, not team/client/personal emails
+  const messages = await listMessages('is:unread in:inbox -label:PROR_PROCESSED subject:(Re:) -from:aeolabs.ai -from:elkhq.com -from:prormarketing.com -from:google.com -from:brevo.com -from:vercel.com -from:slack.com -from:github.com', maxResults);
   return messages;
 }
 
