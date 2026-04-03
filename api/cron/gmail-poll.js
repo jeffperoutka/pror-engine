@@ -512,7 +512,7 @@ function buildSlackBlocks(email, c, opts = {}) {
   });
 
   // ── THREAD CONVERSATION (show back-and-forth: our reply → their reply) ──
-  const userEmail = (process.env.GMAIL_USER_EMAIL || 'jeff@aeolabs.ai').toLowerCase();
+  const userEmail = (process.env.GMAIL_USER_EMAIL || 'josh@systemsnow.ai').toLowerCase();
   if (threadMessages.length > 1) {
     // Show the thread chronologically (skip the first message if it's our original outreach, keep last 6)
     const relevantMsgs = threadMessages.slice(-6);
@@ -910,7 +910,7 @@ async function replayInbox(hours = 24) {
   // Search for ALL inbox messages from the past N hours (including PROR_PROCESSED)
   const since = new Date(Date.now() - hours * 60 * 60 * 1000);
   const afterDate = `${since.getFullYear()}/${String(since.getMonth() + 1).padStart(2, '0')}/${String(since.getDate()).padStart(2, '0')}`;
-  const userEmail = process.env.GMAIL_USER_EMAIL || 'jeff@aeolabs.ai';
+  const userEmail = process.env.GMAIL_USER_EMAIL || 'josh@systemsnow.ai';
   // Search anywhere (not just inbox) to catch archived/processed emails too
   const query = `after:${afterDate} -from:${userEmail} -in:sent -in:drafts -in:trash`;
 
