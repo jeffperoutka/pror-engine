@@ -321,7 +321,7 @@ async function run() {
     blocks,
     `${alertPrefix}Sender Health Report \u2014 ${today}`
   );
-  await discord.postIfConfigured('command', `${alertPrefix}Sender Health Report \u2014 ${today}`, blocks);
+  await discord.postIfConfigured('system-ops', `${alertPrefix}Sender Health Report \u2014 ${today}`, blocks);
 
   // Log to Airtable
   try {

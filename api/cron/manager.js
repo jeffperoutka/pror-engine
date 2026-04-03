@@ -54,6 +54,20 @@ const CRON_SCHEDULE = {
   'weekly-digest':      { maxAgeMinutes: 10500, frequency: 'weekly' },
 };
 
+// ── Junk Domain Filter (skip email providers in negotiations) ───────────────
+
+const JUNK_DOMAINS = new Set([
+  'gmail.com', 'yahoo.com', 'hotmail.com', 'outlook.com', 'aol.com',
+  'icloud.com', 'mail.com', 'protonmail.com', 'zoho.com', 'yandex.com',
+  'live.com', 'msn.com', 'comcast.net', 'att.net', 'verizon.net',
+]);
+
+function isJunkDomain(domain) {
+  if (!domain) return true;
+  const lower = domain.toLowerCase();
+  return JUNK_DOMAINS.has(lower) || lower.includes('google') || lower.length < 4;
+}
+
 // ── Thresholds ──────────────────────────────────────────────────────────────
 
 const THRESHOLDS = {
@@ -327,9 +341,14 @@ async function checkPipelineIntegrity() {
     const hoursStalled = (now - lastDate) / 3600000;
 
     if (hoursStalled > THRESHOLDS.negotiationStallHours) {
+      // Skip negotiations with no client or junk email-provider domains
+      const client = neg.Client;
+      if (!client || client === 'Unknown') continue;
+      if (isJunkDomain(domain)) continue;
+
       alerts.push({
         level: 'warning',
-        client: neg.Client || 'Unknown',
+        client,
         message: `Negotiation with ${domain}: stalled ${Math.round(hoursStalled)} hours`,
       });
     }
@@ -964,152 +983,116 @@ async function generateSuggestions(costAnalysis, anomalies) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// SECTION 7: SLACK REPORT
+// SECTION 7: DAILY BRIEF REPORT
 // ─────────────────────────────────────────────────────────────────────────────
 
-async function postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, autoActions, suggestions, quickStats, deliverability = {}) {
+async function postDailyBrief(health, pipelineAlerts, anomalies, autoActions, quickStats, deliverability = {}) {
   const now = new Date();
-  const timeSAST = now.toLocaleTimeString('en-US', {
-    timeZone: 'Africa/Johannesburg',
-    hour: 'numeric',
-    minute: '2-digit',
-    hour12: true,
-  });
   const dateSAST = now.toLocaleDateString('en-US', {
     timeZone: 'Africa/Johannesburg',
     month: 'long',
     day: 'numeric',
   });
 
-  let msg = `\ud83e\udd16 *Manager Check-In — ${dateSAST}, ${timeSAST}*\n\n`;
+  let msg = `**PROR Daily Brief — ${dateSAST}**\n\n`;
 
-  // ── System Status ──
-  msg += `\u2501\u2501\u2501 SYSTEM STATUS \u2501\u2501\u2501\n`;
-  for (const cron of health) {
-    const emoji = cron.status === 'ok' ? '\u2705' : cron.status === 'overdue' ? '\u26a0\ufe0f' : '\u2753';
-    msg += `${emoji} ${cron.cronName}: ${cron.detail}\n`;
-  }
-  msg += '\n';
+  // ── ACTION NEEDED (most important — top of report) ──
+  // New opportunities awaiting decision
+  const opportunities = quickStats.newOpportunitiesToday || 0;
+  const opportunities7d = quickStats.newOpportunities7d || 0;
 
-  // ── Deliverability Health ──
-  if (deliverability.totalSent > 0) {
-    const openPct = (deliverability.overallOpenRate * 100).toFixed(1);
-    const replyPct = (deliverability.overallReplyRate * 100).toFixed(1);
-    const bouncePct = (deliverability.overallBounceRate * 100).toFixed(1);
-    const openEmoji = deliverability.overallOpenRate === 0 ? '\ud83d\udea8' : deliverability.overallOpenRate < 0.1 ? '\u26a0\ufe0f' : '\u2705';
-    const pollEmoji = deliverability.gmailPollHealthy ? '\u2705' : '\ud83d\udea8';
+  // Stalled negotiations — filter junk domains and "Unknown" clients
+  const stalledAlerts = pipelineAlerts.filter(a =>
+    a.message.includes('stalled') &&
+    a.client !== 'Unknown' &&
+    !isJunkDomain(a.message.match(/with ([^:]+):/)?.[1])
+  );
 
-    msg += `\u2501\u2501\u2501 DELIVERABILITY (7-day) \u2501\u2501\u2501\n`;
-    msg += `${openEmoji} Open rate: ${openPct}% | Replies: ${deliverability.totalReplies} | Bounce: ${bouncePct}%\n`;
-    msg += `\ud83d\udce7 Sent: ${deliverability.totalSent} | Delivered: ${deliverability.totalDelivered}\n`;
-    msg += `${pollEmoji} Gmail-poll: ${deliverability.gmailPollLastRun !== null ? `last ran ${Math.round(deliverability.gmailPollLastRun)} min ago` : 'never logged — may be failing silently'}\n`;
-    if (deliverability.overallOpenRate === 0) {
-      msg += `\ud83d\udea8 *CRITICAL: 0% open rate = all emails going to spam. Check DKIM/SPF/DMARC on all sender domains.*\n`;
+  // Critical issues (domain auth, deliverability)
+  const criticalAlerts = pipelineAlerts.filter(a => a.level === 'critical');
+  const criticalAnomalies = anomalies.filter(a => a.level === 'critical');
+
+  const hasActionItems = stalledAlerts.length > 0 || criticalAlerts.length > 0 || criticalAnomalies.length > 0;
+
+  if (hasActionItems) {
+    msg += `\u2501\u2501 ACTION NEEDED \u2501\u2501\n`;
+
+    if (criticalAlerts.length > 0 || criticalAnomalies.length > 0) {
+      for (const a of [...criticalAlerts, ...criticalAnomalies]) {
+        msg += `\ud83d\udd34 ${a.client}: ${a.message}\n`;
+      }
+    }
+
+    if (stalledAlerts.length > 0) {
+      msg += `${stalledAlerts.length} stalled negotiation${stalledAlerts.length > 1 ? 's' : ''} (>48h)\n`;
+      for (const a of stalledAlerts.slice(0, 5)) {
+        const domain = a.message.match(/with ([^:]+):/)?.[1] || '?';
+        const hours = a.message.match(/stalled (\d+)/)?.[1] || '?';
+        msg += `  \u2022 ${domain} (${a.client}) \u2014 ${hours}h\n`;
+      }
+      if (stalledAlerts.length > 5) {
+        msg += `  \u2022 ...and ${stalledAlerts.length - 5} more\n`;
+      }
     }
     msg += '\n';
   }
 
-  // ── Domain Authentication ──
-  const domainIssues = deliverability.domainAuthIssues || [];
-  if (domainIssues.length > 0) {
-    msg += `\u2501\u2501\u2501 \ud83d\udd10 DOMAIN AUTH \u2501\u2501\u2501\n`;
-    for (const issue of domainIssues) {
-      msg += `\ud83d\udd34 ${issue.message}\n`;
-    }
-    msg += '\n';
-  }
-
-  // ── Pipeline Alerts ──
-  if (pipelineAlerts.length > 0) {
-    msg += `\u2501\u2501\u2501 PIPELINE ALERTS \u2501\u2501\u2501\n`;
-    for (const alert of pipelineAlerts) {
-      const emoji = alert.level === 'critical' ? '\ud83d\udd34' : '\u26a0\ufe0f';
-      msg += `${emoji} ${alert.client}: ${alert.message}\n`;
-    }
-    msg += '\n';
-  }
-
-  // ── Anomalies ──
-  msg += `\u2501\u2501\u2501 ANOMALIES \u2501\u2501\u2501\n`;
-  const significantAnomalies = anomalies.filter(a => a.level !== 'info');
-  if (significantAnomalies.length > 0) {
-    for (const anomaly of significantAnomalies) {
-      const emoji = anomaly.level === 'critical' ? '\ud83d\udd34' : '\ud83d\udcc9';
-      msg += `${emoji} ${anomaly.client}: ${anomaly.message}\n`;
-    }
-  } else {
-    msg += `\ud83d\udcca All clients within normal range\n`;
-  }
-  msg += '\n';
-
-  // ── Auto-Actions Taken ──
+  // ── AUTO-ACTIONS (if the system took action) ──
   if (autoActions.length > 0) {
-    msg += `\u2501\u2501\u2501 AUTO-ACTIONS TAKEN \u2501\u2501\u2501\n`;
+    msg += `\u2501\u2501 AUTO-ACTIONS \u2501\u2501\n`;
     for (const action of autoActions) {
       msg += `\ud83d\udd27 ${action.action}\n`;
     }
     msg += '\n';
   }
 
-  // ── Cost Alerts ──
-  const costAlerts = costAnalysis.filter(c => c.alerts.length > 0);
-  if (costAlerts.length > 0) {
-    msg += `\u2501\u2501\u2501 COST ALERTS \u2501\u2501\u2501\n`;
-    for (const entry of costAlerts) {
-      for (const alert of entry.alerts) {
-        msg += `\ud83d\udcb0 ${entry.client}: ${alert}\n`;
-      }
-    }
-    msg += '\n';
-  }
-
-  // ── Suggestions ──
-  if (suggestions.length > 0) {
-    msg += `\u2501\u2501\u2501 \ud83d\udca1 SUGGESTIONS \u2501\u2501\u2501\n`;
-    for (const suggestion of suggestions) {
-      const cleaned = suggestion.replace(/^\d+[\.\)]\s*/, '').replace(/^[-•]\s*/, '');
-      if (cleaned.length > 5) {
-        msg += `\u2022 ${cleaned}\n`;
-      }
-    }
-    msg += '\n';
-  }
-
-  // ── Prospect Pipeline (most important metric) ──
-  msg += `\u2501\u2501\u2501 \ud83c\udfaf PROSPECT PIPELINE \u2501\u2501\u2501\n`;
-  msg += `New sites added (7d): ${quickStats.newProspects7d} | Daily avg: ~${quickStats.newProspectsDailyAvg}/day\n`;
-  msg += `New sites added (this month): ${quickStats.newProspectsMonth}\n`;
-  msg += `New opportunities (sites replied, 7d): ${quickStats.newOpportunities7d} | Today: ${quickStats.newOpportunitiesToday}\n`;
-  if (quickStats.serpCost7d > 0) {
-    msg += `Prospecting cost (7d): $${quickStats.serpCost7d.toFixed(2)}\n`;
-  }
-  // Per-client breakdown if any data exists
-  const prospectEntries = Object.entries(quickStats.prospectsByClient || {}).filter(([, v]) => v > 0);
-  if (prospectEntries.length > 0) {
-    msg += `Per client (7d): ${prospectEntries.map(([k, v]) => `${k}: +${v}`).join(' | ')}\n`;
+  // ── YESTERDAY'S RESULTS ──
+  msg += `\u2501\u2501 YESTERDAY \u2501\u2501\n`;
+  msg += `Sent: ${quickStats.emailsToday} | Replies: ${quickStats.repliesToday} | New opportunities: ${opportunities}\n`;
+  msg += `Links placed (MTD): ${quickStats.linksThisMonth} | Won negotiations (MTD): ${quickStats.wonNegotiationsMonth || 0}\n`;
+  msg += `Open negotiations: ${quickStats.openNegotiations} | Revenue (MTD): $${quickStats.revenueThisMonth}\n`;
+  if (opportunities7d > 0) {
+    msg += `Opportunities (7d): ${opportunities7d} | Prospecting spend (7d): $${quickStats.serpCost7d.toFixed(2)}\n`;
   }
   msg += '\n';
 
-  // ── Quick Stats ──
-  msg += `\u2501\u2501\u2501 \ud83d\udcca QUICK STATS \u2501\u2501\u2501\n`;
-  msg += `Active clients: ${quickStats.activeClients} | `;
-  msg += `Emails today: ${quickStats.emailsToday} | `;
-  msg += `Replies today: ${quickStats.repliesToday}\n`;
-  msg += `Open negotiations: ${quickStats.openNegotiations} | `;
-  msg += `Links this month: ${quickStats.linksThisMonth} | `;
-  msg += `Revenue this month: $${quickStats.revenueThisMonth}`;
+  // ── HEALTH (compact — only show issues) ──
+  const cronIssues = health.filter(c => c.status !== 'ok');
+  const lowInventory = pipelineAlerts.filter(a => a.message.includes('prospects in queue') || a.message.includes('drip queue'));
+  const lowInventoryCount = lowInventory.length;
 
-  // Determine if we need to @channel for critical issues
-  const hasCritical = pipelineAlerts.some(a => a.level === 'critical') ||
-                      anomalies.some(a => a.level === 'critical') ||
-                      domainIssues.length > 0;
-  if (hasCritical) {
-    msg = `<!channel> ${msg}`;
+  msg += `\u2501\u2501 HEALTH \u2501\u2501\n`;
+
+  // System health
+  if (cronIssues.length === 0) {
+    msg += `All systems \u2705\n`;
+  } else {
+    for (const c of cronIssues) {
+      const emoji = c.status === 'overdue' ? '\u26a0\ufe0f' : '\u2753';
+      msg += `${emoji} ${c.cronName}: ${c.detail}\n`;
+    }
+  }
+
+  // Drip inventory (grouped, not per-client spam)
+  if (lowInventoryCount > 0) {
+    const healthyCount = CLIENTS.length - lowInventoryCount;
+    msg += `Drip inventory: ${lowInventoryCount} clients low (<3 days)`;
+    if (healthyCount > 0) msg += ` | ${healthyCount} healthy`;
+    msg += '\n';
+  } else {
+    msg += `Drip inventory: All clients OK\n`;
+  }
+
+  // Deliverability one-liner
+  if (deliverability.totalSent > 0) {
+    const openPct = (deliverability.overallOpenRate * 100).toFixed(1);
+    const replyPct = (deliverability.overallReplyRate * 100).toFixed(1);
+    msg += `Deliverability (7d): ${openPct}% open | ${replyPct}% reply | ${deliverability.totalSent} sent\n`;
   }
 
   await slack.post(CHANNEL(), msg);
-  await discord.postIfConfigured('command', msg);
-  console.log('[manager] Report posted');
+  await discord.postIfConfigured('daily-brief', msg);
+  console.log('[manager] Daily brief posted');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1137,6 +1120,15 @@ async function gatherQuickStats() {
 
   // Dedupe by domain for open negotiations count
   const uniqueNegDomains = new Set(openNeg.map(n => n.Domain).filter(Boolean));
+
+  // Get won negotiations this month
+  const wonNeg = await airtableSelect('Negotiations', {
+    filterByFormula: `AND(
+      {Action} = "won",
+      DATETIME_FORMAT({Date}, 'YYYY-MM') = "${thisMonth}"
+    )`,
+  });
+  const wonNegotiationsMonth = new Set(wonNeg.map(n => n.Domain).filter(Boolean)).size;
 
   // Get links this month
   const monthLinks = await airtableSelect('Links', {
@@ -1195,6 +1187,7 @@ async function gatherQuickStats() {
     emailsToday: todayStats.sent,
     repliesToday: todayStats.replies,
     openNegotiations: uniqueNegDomains.size,
+    wonNegotiationsMonth,
     linksThisMonth: monthLinks.length,
     revenueThisMonth: Math.round(revenue),
     // Prospect pipeline
@@ -1226,13 +1219,10 @@ async function run() {
     // 3. Performance anomaly detection (also gets campaign data we reuse)
     const anomalies = await detectAnomalies();
 
-    // 4. Get campaign data for cost analysis
+    // 4. Deliverability health — aggregate open/reply stats across all clients
     const todayStr = new Date().toISOString().split('T')[0];
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
     const recentCampaigns = await getRecentCampaigns(sevenDaysAgo, todayStr);
-    const recentByClient = campaignsByClient(recentCampaigns);
-
-    // 5. Deliverability health — aggregate open/reply stats across all clients
     const allRecentStats = aggregateStats(recentCampaigns);
     const deliverability = {
       totalSent: allRecentStats.sent,
@@ -1267,22 +1257,16 @@ async function run() {
     pipelineAlerts.push(...domainAuthIssues);
     deliverability.domainAuthIssues = domainAuthIssues;
 
-    // 7. Cost efficiency analysis
-    const costAnalysis = await analyzeCostEfficiency(recentByClient);
-
-    // 8. Auto-fix (takes action on critical issues, including unauth domain pauses)
+    // 7. Auto-fix (takes action on critical issues, including unauth domain pauses)
     const autoActions = await executeAutoFixes(pipelineAlerts, anomalies);
 
-    // 9. AI suggestions
-    const suggestions = await generateSuggestions(costAnalysis, anomalies);
-
-    // 10. Quick stats
+    // 8. Quick stats
     const quickStats = await gatherQuickStats();
 
-    // 11. Post Slack report
-    await postSlackReport(health, pipelineAlerts, anomalies, costAnalysis, autoActions, suggestions, quickStats, deliverability);
+    // 9. Post daily brief (clean, action-focused report)
+    await postDailyBrief(health, pipelineAlerts, anomalies, autoActions, quickStats, deliverability);
 
-    // 10. Log this Manager run to SystemHealth
+    // 10. Log this run to SystemHealth
     await airtableCreate('SystemHealth', {
       Type: 'cron_run',
       CronName: 'manager',
@@ -1303,8 +1287,6 @@ async function run() {
       pipelineAlerts: pipelineAlerts.length,
       anomalies: anomalies.length,
       autoActions: autoActions.length,
-      costAlerts: costAnalysis.filter(c => c.alerts.length > 0).length,
-      suggestions: suggestions.length,
       durationMs: Date.now() - startTime,
     };
   } catch (err) {
@@ -1317,7 +1299,7 @@ async function run() {
     } catch (slackErr) {
       console.error('[manager] Could not post error to Slack:', slackErr.message);
     }
-    await discord.postIfConfigured('command', errorMsg);
+    await discord.postIfConfigured('daily-brief', errorMsg);
 
     throw err;
   }

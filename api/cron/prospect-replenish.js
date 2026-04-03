@@ -822,7 +822,7 @@ async function runReplenishment() {
   } catch (err) {
     console.error(`Slack post failed: ${err.message}`);
   }
-  await discord.postIfConfigured('command', summary);
+  await discord.postIfConfigured('system-ops', summary);
 
   return { results, deferred, totalNewProspects, totalCost };
 }

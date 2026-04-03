@@ -273,7 +273,7 @@ async function runDripSender() {
   // Also post to Discord if configured
   try {
     const discord = require('../../shared/discord');
-    await discord.postIfConfigured('command', summary);
+    await discord.postIfConfigured('system-ops', summary);
   } catch { /* discord module may not exist */ }
 
   console.log(`[drip-sender] Complete — ${totalSent} sent, ${totalErrors} errors in ${duration}s`);

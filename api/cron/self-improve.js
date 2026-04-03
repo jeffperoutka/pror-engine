@@ -978,7 +978,7 @@ async function run() {
   if (channel) {
     await slack.post(channel, report);
   }
-  await discord.postIfConfigured('command', report);
+  await discord.postIfConfigured('system-ops', report);
   console.log('[self-improve] Report posted');
 
   const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);

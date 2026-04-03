@@ -328,7 +328,7 @@ async function postReport(stats) {
   }
 
   await slack.post(CHANNEL(), msg);
-  await discord.postIfConfigured('command', msg);
+  await discord.postIfConfigured('system-ops', msg);
   console.log(`[bounce-cleanup] Report posted`);
 }
 
@@ -401,7 +401,7 @@ async function run() {
     } catch (slackErr) {
       console.error('[bounce-cleanup] Could not post error to Slack:', slackErr.message);
     }
-    await discord.postIfConfigured('command', errorMsg);
+    await discord.postIfConfigured('system-ops', errorMsg);
 
     throw err;
   }

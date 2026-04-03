@@ -7,6 +7,9 @@
 // Channel map — mirrors slack.js CHANNELS but returns Discord webhook URLs
 const CHANNELS = {
   command: () => process.env.DISCORD_WEBHOOK_COMMAND,
+  'daily-brief': () => process.env.DISCORD_WEBHOOK_DAILY_BRIEF,
+  'weekly-report': () => process.env.DISCORD_WEBHOOK_WEEKLY_REPORT,
+  'system-ops': () => process.env.DISCORD_WEBHOOK_SYSTEM_OPS,
   links: () => process.env.DISCORD_WEBHOOK_LINKS,
   reddit: () => process.env.DISCORD_WEBHOOK_REDDIT,
   clients: () => process.env.DISCORD_WEBHOOK_CLIENTS,
@@ -15,7 +18,8 @@ const CHANNELS = {
 };
 
 /**
- * Post a plain text message via Discord webhook
+ * Post a plain text message via Discord webhook.
+ * Automatically splits messages over 2000 chars into multiple posts at line boundaries.
  */
 async function post(webhookUrl, text) {
   if (!webhookUrl) {
@@ -23,21 +27,31 @@ async function post(webhookUrl, text) {
     return null;
   }
 
-  // Discord max message length is 2000 chars
-  const truncated = text.length > 2000 ? text.slice(0, 1997) + '...' : text;
+  // Split into chunks that fit within Discord's 2000-char limit
+  const chunks = splitText(text, 2000);
+  let lastResult = null;
 
-  const res = await fetch(webhookUrl + '?wait=true', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ content: truncated }),
-  });
+  for (let i = 0; i < chunks.length; i++) {
+    const res = await fetch(webhookUrl + '?wait=true', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: chunks[i] }),
+    });
 
-  if (!res.ok) {
-    const err = await res.text();
-    console.error('[discord] Post failed:', res.status, err);
-    return null;
+    if (!res.ok) {
+      const err = await res.text();
+      console.error('[discord] Post failed:', res.status, err);
+      return null;
+    }
+    lastResult = await res.json();
+
+    // Rate limit safety between chunks
+    if (i < chunks.length - 1) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
   }
-  return res.json();
+
+  return lastResult;
 }
 
 /**

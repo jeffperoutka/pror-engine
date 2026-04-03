@@ -645,7 +645,7 @@ async function run() {
   // Post to Slack + Discord
   const digestTitle = `📊 PROR Weekly Digest — Week of ${weekOf}`;
   await slack.postBlocks(CHANNEL(), blocks, digestTitle);
-  await discord.postIfConfigured('command', digestTitle, blocks);
+  await discord.postIfConfigured('weekly-report', digestTitle, blocks);
 
   console.error(`[weekly-digest] Report posted. Totals: sent=${totals.sent}, opens=${totals.opens}, replies=${totals.replies}, links=${thisWeekLinks.length}`);
 
