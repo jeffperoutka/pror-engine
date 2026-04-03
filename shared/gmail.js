@@ -7,7 +7,7 @@
 const CLIENT_ID     = () => process.env.GMAIL_CLIENT_ID;
 const CLIENT_SECRET = () => process.env.GMAIL_CLIENT_SECRET;
 const REFRESH_TOKEN = () => process.env.GMAIL_REFRESH_TOKEN;
-const USER_EMAIL    = () => process.env.GMAIL_USER_EMAIL || 'jeff@aeolabs.ai';
+const USER_EMAIL    = () => process.env.GMAIL_USER_EMAIL || 'josh@systemsnow.ai';
 
 // ── Token Management ─────────────────────────────────────────────────────────
 
@@ -245,7 +245,7 @@ async function getUnreadOutreachReplies(maxResults = 25) {
 
 /**
  * Get recent inbox messages (regardless of read status) from the last N minutes.
- * Excludes messages sent by us (from: jeff@aeolabs.ai).
+ * Excludes messages sent by us (from: josh@systemsnow.ai).
  * Used as fallback when emails are read before gmail-poll gets to them.
  * @param {number} minutesBack - How many minutes back to look
  * @param {number} maxResults

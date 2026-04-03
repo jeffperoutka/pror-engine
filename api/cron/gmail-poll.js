@@ -216,7 +216,7 @@ LINK EXCHANGE RULES:
 
 TONE:
 - draft_reply: natural, conversational, peer-to-peer. No bullet points. Write like a real person.
-- Sign off as "Jeff / Content Partnerships"
+- Sign off as "Josh / Content Partnerships"
 - NEVER promise calls or meetings. Email only.
 - Keep replies short (2-3 sentences max), friendly, move conversation forward.`;
 
@@ -723,8 +723,8 @@ async function processInbox() {
       if (c.type === 'link_exchange' || c.wants_link_exchange) {
         let autoReplySent = false;
         let replyText = '';
-        // AUTO-REPLY KILL SWITCH — all replies paused by Jeff
-        if (false && c.should_auto_reply && c.draft_reply && !recentAutoReply) {
+        // Auto-reply — only for outreach replies and vetted inbound pitches
+        if (c.should_auto_reply && c.draft_reply && !recentAutoReply) {
           try {
             await gmail.sendReply(email.messageId, email.threadId, extractReplyAddress(email.from), email.subject, c.draft_reply);
             autoReplySent = true;
@@ -802,9 +802,9 @@ async function processInbox() {
           }
         }
 
-        // ── PRICE CONFIRMED — PAUSED (kill switch active) ──
-        if (false && c.price_confirmed && c.price_mentioned <= maxPrice && !recentAutoReply) {
-          const confirmReply = `Hey, that works for us — $${c.price_mentioned} is good. We'll start preparing content and will be in touch soon to coordinate. Looking forward to working together!\n\nBest,\nJeff / Content Partnerships`;
+        // ── PRICE CONFIRMED or OPPORTUNITY (under $250) — add to Airtable ──
+        if (c.price_confirmed && c.price_mentioned <= 250 && !recentAutoReply) {
+          const confirmReply = `Hey, that works for us — $${c.price_mentioned} is good. We'll start preparing content and will be in touch soon to coordinate. Looking forward to working together!\n\nBest,\nJosh / Content Partnerships`;
           try {
             await gmail.sendReply(email.messageId, email.threadId, extractReplyAddress(email.from), email.subject, confirmReply);
             autoReplySent = true;
