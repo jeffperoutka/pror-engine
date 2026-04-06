@@ -21,6 +21,8 @@ const CHANNEL = () => process.env.CHANNEL_COMMAND_CENTER;
 const TIMEOUT_SAFETY_MS = 200_000; // Stop processing new clients after 200s (sync handler, 300s limit)
 const MAX_CLIENTS_PER_RUN = 2;     // Process max 2 clients per run to stay within 300s
 const REPLENISH_THRESHOLD = 150;   // Trigger replenish if < 150 unsent prospects remain
+const BACKLOG_MAX_DAYS = 7;        // Don't pull new prospects if backlog > 7 days at current send rate
+const DAILY_SEND_RATE = 30;        // Max emails sent per client per day (matches drip-sender MAX_PER_CLIENT)
 const SUFFIXES = [
   'write for us', 'guest post', 'submit article', 'sponsored post',
 ];
@@ -613,6 +615,12 @@ async function processClient(clientConfig, week, globalDedupeSet, preCountedRema
     return { slug, name, status: 'skipped', remaining, newProspects: 0, reason: `${remaining} remaining >= ${REPLENISH_THRESHOLD} threshold` };
   }
 
+  // Backlog guard: don't pull new prospects if existing queue would take > 7 days to clear
+  const backlogDays = Math.ceil(remaining / DAILY_SEND_RATE);
+  if (backlogDays > BACKLOG_MAX_DAYS) {
+    return { slug, name, status: 'skipped', remaining, newProspects: 0, reason: `backlog ${remaining} emails = ~${backlogDays} days (>${BACKLOG_MAX_DAYS} day limit)` };
+  }
+
   // Step 2: Get DripQueue domains for deduplication (fast — only checks our own queue)
   // Skipping Brevo contacts fetch (6000+ records, ~30s) to stay within 300s timeout
   log('Loading DripQueue domains for dedup...');
@@ -741,8 +749,11 @@ async function runReplenishment() {
 
   console.log(`Step 1 done (${Date.now() - t0}ms). Priority order:`);
   for (const { config, remaining } of clientStatus) {
-    const urgent = remaining < REPLENISH_THRESHOLD ? '** NEEDS REPLENISH **' : 'OK';
-    console.log(`  ${config.slug}: ${remaining} remaining — ${urgent}`);
+    const backlogDays = Math.ceil(remaining / DAILY_SEND_RATE);
+    const urgent = remaining < REPLENISH_THRESHOLD
+      ? (backlogDays > BACKLOG_MAX_DAYS ? `BACKLOG (~${backlogDays} days, skipping)` : '** NEEDS REPLENISH **')
+      : 'OK';
+    console.log(`  ${config.slug}: ${remaining} remaining (~${backlogDays}d backlog) — ${urgent}`);
   }
 
   // Step 2: Process clients in priority order, respecting timeout + max per run
@@ -754,6 +765,13 @@ async function runReplenishment() {
     // Skip clients above threshold immediately (no need to call processClient)
     if (remaining >= REPLENISH_THRESHOLD) {
       results.push({ slug: config.slug, name: config.name, status: 'skipped', remaining, newProspects: 0, reason: `${remaining} remaining >= ${REPLENISH_THRESHOLD} threshold` });
+      continue;
+    }
+
+    // Skip clients with backlog > 7 days — don't pile up more prospects
+    const backlogDays = Math.ceil(remaining / DAILY_SEND_RATE);
+    if (backlogDays > BACKLOG_MAX_DAYS) {
+      results.push({ slug: config.slug, name: config.name, status: 'skipped', remaining, newProspects: 0, reason: `backlog ~${backlogDays} days (>${BACKLOG_MAX_DAYS}d limit)` });
       continue;
     }
 
