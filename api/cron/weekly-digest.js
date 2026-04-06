@@ -632,6 +632,57 @@ async function run() {
     blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '_No alerts — first week, baseline being established_' } });
   }
 
+  // ━━━ SECTION 7: WHAT'S WORKING / NOT / CHANGING ━━━
+  blocks.push({ type: 'divider' });
+  blocks.push({
+    type: 'section',
+    text: { type: 'mrkdwn', text: '*━━━ 🔬 WHAT\'S WORKING / NOT / CHANGING ━━━*' },
+  });
+
+  const working = [];
+  const notWorking = [];
+  const changing = [];
+
+  // Identify what's working: high performers
+  for (const client of clients) {
+    const s = thisWeekStats[client] || {};
+    if (!s.sent || s.sent === 0) continue;
+    const replyRate = (s.replies || 0) / s.sent;
+    const openRate = (s.opens || 0) / s.sent;
+    if (replyRate >= 0.05) working.push(`✅ *${client}*: ${(replyRate * 100).toFixed(1)}% reply rate, ${(openRate * 100).toFixed(0)}% opens`);
+    if (openRate < 0.15 && s.sent >= 20) notWorking.push(`❌ *${client}*: ${(openRate * 100).toFixed(0)}% open rate — templates/subject lines need revision`);
+    else if (openRate >= 0.30 && replyRate < 0.02 && s.sent >= 20) notWorking.push(`❌ *${client}*: Opens strong (${(openRate * 100).toFixed(0)}%) but ${(replyRate * 100).toFixed(1)}% replies — email body not converting`);
+  }
+
+  // A/B test status: what's changing
+  if (abInsight) {
+    changing.push(`🧪 *${abInsight.name}*: Variant ${abInsight.winner} winning — will become default once sample size met`);
+  }
+  // Volume changes
+  if (totals.sent > 0 && lastTotals.sent > 0) {
+    const volChange = ((totals.sent - lastTotals.sent) / lastTotals.sent * 100).toFixed(0);
+    if (Math.abs(volChange) > 10) {
+      changing.push(`📊 Send volume ${volChange > 0 ? 'up' : 'down'} ${Math.abs(volChange)}% week-over-week`);
+    }
+  }
+  // Reply rate trend
+  if (thisReplyRate > lastReplyRate + 0.5) {
+    changing.push(`📈 Reply rate improving: ${lastReplyRate.toFixed(1)}% → ${thisReplyRate.toFixed(1)}%`);
+  } else if (thisReplyRate < lastReplyRate - 0.5) {
+    changing.push(`📉 Reply rate declining: ${lastReplyRate.toFixed(1)}% → ${thisReplyRate.toFixed(1)}% — investigate templates`);
+  }
+
+  const wwncLines = [];
+  if (working.length > 0) wwncLines.push('*What\'s working:*\n' + working.join('\n'));
+  if (notWorking.length > 0) wwncLines.push('*What\'s not:*\n' + notWorking.join('\n'));
+  if (changing.length > 0) wwncLines.push('*What\'s changing:*\n' + changing.join('\n'));
+
+  if (wwncLines.length > 0) {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: wwncLines.join('\n\n') } });
+  } else {
+    blocks.push({ type: 'section', text: { type: 'mrkdwn', text: '_Collecting baseline data — full analysis starts next week_' } });
+  }
+
   // Footer
   blocks.push({ type: 'divider' });
   blocks.push({
