@@ -190,11 +190,12 @@ async function runDripSender() {
 
       const subject = fillTemplate(template.subjects[nextStep - 1], contact);
       const bodyText = fillTemplate(template.bodies[nextStep - 1], contact);
-      const html = toHtml(bodyText);
+      const preheader = template.preheaders ? fillTemplate(template.preheaders[nextStep - 1], contact) : '';
+      const html = toHtml(bodyText, preheader);
 
       const sender = {
         email: rec.SenderEmail,
-        name: 'Yam Roar',
+        name: 'Josh',
         id: rec.SenderId,
       };
 

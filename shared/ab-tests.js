@@ -22,18 +22,18 @@ const airtable = require('./airtable');
 // The system will automatically split traffic and track results.
 
 const ACTIVE_TESTS = {
-  // Test 1: Subject line personalization
-  'subject-personalization-v1': {
+  // Test 1: Subject line — niche-specific vs generic
+  'subject-niche-v2': {
     metric: 'open_rate',
-    minSampleSize: 50, // per variant before calling winner
+    minSampleSize: 30, // lowered from 50 to get results faster
     variants: {
       A: {
-        label: 'Generic subject',
-        subjectTemplate: 'Content collaboration opportunity',
+        label: 'Niche topic + site name (new default)',
+        subjectTemplate: '{{params.NICHE}} piece for {{params.SITE_NAME}}',
       },
       B: {
-        label: 'Personalized subject with site name',
-        subjectTemplate: 'Content idea for {{params.SITE_NAME}}',
+        label: 'Curiosity hook — no niche reveal',
+        subjectTemplate: 'Thought this might fit {{params.SITE_NAME}}',
       },
     },
   },
@@ -41,14 +41,14 @@ const ACTIVE_TESTS = {
   // Test 2: Opening line approach
   'opening-line-v1': {
     metric: 'reply_rate',
-    minSampleSize: 50,
+    minSampleSize: 30,
     variants: {
       A: {
-        label: 'Compliment opener',
-        bodyPrefix: 'I came across {{params.ARTICLE_TITLE}} and really enjoyed it.',
+        label: 'Compliment opener (reference article)',
+        bodyPrefix: 'Your piece on {{params.ARTICLE_TITLE}} was a great read.',
       },
       B: {
-        label: 'Direct value opener',
+        label: 'Direct value — skip flattery',
         bodyPrefix: 'I have a content piece that would be a great fit for your readers.',
       },
     },
@@ -57,7 +57,7 @@ const ACTIVE_TESTS = {
   // Test 3: Negotiation opening offer
   'negotiation-anchor-v1': {
     metric: 'negotiation_success',
-    minSampleSize: 30,
+    minSampleSize: 20,
     variants: {
       A: {
         label: '50% anchor',
@@ -73,7 +73,7 @@ const ACTIVE_TESTS = {
   // Test 4: Follow-up timing
   'followup-timing-v1': {
     metric: 'reply_rate',
-    minSampleSize: 50,
+    minSampleSize: 30,
     variants: {
       A: {
         label: 'Standard (Day 3, 7, 14)',
@@ -82,6 +82,38 @@ const ACTIVE_TESTS = {
       B: {
         label: 'Faster (Day 2, 5, 10)',
         delays: [2, 5, 10],
+      },
+    },
+  },
+
+  // Test 5: Sender name — "Josh" vs "Josh from [Brand]"
+  'sender-name-v1': {
+    metric: 'open_rate',
+    minSampleSize: 30,
+    variants: {
+      A: {
+        label: 'First name only: Josh',
+        senderName: 'Josh',
+      },
+      B: {
+        label: 'Name + role: Josh | Content Partnerships',
+        senderName: 'Josh | Content Partnerships',
+      },
+    },
+  },
+
+  // Test 6: CTA style — question vs statement
+  'cta-style-v1': {
+    metric: 'reply_rate',
+    minSampleSize: 30,
+    variants: {
+      A: {
+        label: 'Question CTA',
+        ctaSuffix: 'Would you be open to a contributed article?',
+      },
+      B: {
+        label: 'Soft assumption CTA',
+        ctaSuffix: 'Happy to send over a few topic ideas if you\'re interested.',
       },
     },
   },
