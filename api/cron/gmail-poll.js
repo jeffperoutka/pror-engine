@@ -165,11 +165,18 @@ Body:
 ${safeBody}
 ---
 
+MULTI-PRICE HANDLING:
+- Sites often send pricing for MULTIPLE placement types (guest post, link insertion, niche rates, etc.) or link to a spreadsheet with rates.
+- "price_mentioned" should be the LOWEST available price (usually link insertion / general niche) — that's what we want.
+- If they send a spreadsheet link or say "see attached rates", set price_mentioned to null but include available prices in the summary.
+- "all_prices" captures every price they mention for our records.
+
 Respond with ONLY valid JSON, no markdown, no explanation:
 {
   "type": "reply_to_outreach" | "inbound_pitch" | "link_exchange" | "auto_reply" | "spam" | "other",
   "sentiment": "positive" | "neutral" | "negative",
-  "price_mentioned": null or number in USD,
+  "price_mentioned": null or number in USD (use the LOWEST/cheapest option),
+  "all_prices": {"guest_post": null, "link_insertion": null, "niche": null} or null,
   "wants_link_exchange": true | false,
   "summary": "one sentence max 15 words",
   "suggested_action": "negotiate" | "accept" | "decline" | "flag_jeff" | "ignore",
@@ -790,6 +797,14 @@ async function processInbox() {
           if (c.price_mentioned) {
             airtableUpdates['Quoted Price'] = c.price_mentioned;
           }
+          // Store all prices if multiple were mentioned (GP, LI, niche)
+          if (c.all_prices) {
+            const priceNotes = Object.entries(c.all_prices)
+              .filter(([, v]) => v != null)
+              .map(([k, v]) => `${k}: $${v}`)
+              .join(', ');
+            if (priceNotes) airtableUpdates['Price Notes'] = priceNotes;
+          }
           if (c.price_confirmed && c.price_mentioned <= maxPrice) {
             airtableUpdates['Status'] = 'Price Confirmed';
             airtableUpdates['Confirmed Price'] = c.price_mentioned;
@@ -802,9 +817,18 @@ async function processInbox() {
           }
         }
 
+        // ── AUTO-ACCEPT: if price is within budget and haggling is stale (3+ rounds or repeated price) ──
+        const theirPrice = c.price_mentioned || null;
+        if (!c.price_confirmed && theirPrice && theirPrice <= maxPrice && round >= 3 && !recentAutoReply) {
+          // They've been negotiating and their price is within our max — accept it
+          console.error(`[AUTO-ACCEPT] ${senderDomain} at $${theirPrice} (round ${round}, max $${maxPrice})`);
+          c.price_confirmed = true;
+          c.price_mentioned = theirPrice;
+        }
+
         // ── PRICE CONFIRMED or OPPORTUNITY (under $250) — add to Airtable ──
-        if (c.price_confirmed && c.price_mentioned <= 250 && !recentAutoReply) {
-          const confirmReply = `Hey, that works for us — $${c.price_mentioned} is good. We'll start preparing content and will be in touch soon to coordinate. Looking forward to working together!\n\nBest,\nJosh / Content Partnerships`;
+        if (c.price_confirmed && c.price_mentioned != null && c.price_mentioned > 0 && c.price_mentioned <= 250 && !recentAutoReply) {
+          const confirmReply = `Hey, that works for us — $${c.price_mentioned} is good. We're preparing content now and will be in touch soon to coordinate. Looking forward to working together!\n\nBest,\nJosh / Content Partnerships`;
           try {
             await gmail.sendReply(email.messageId, email.threadId, extractReplyAddress(email.from), email.subject, confirmReply);
             autoReplySent = true;
